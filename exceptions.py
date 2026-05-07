@@ -1,14 +1,17 @@
-# class StateMachineError[A: AuditRecord](Exception):
 class StateMachineError(Exception):
-    def __init__(self, **kwargs) -> None:
-        audit = kwargs.get("audit")
-        if audit:
-            formatted_msg = self.msg.format(**audit.details)
-        else:
-            formatted_msg = self.msg.format(**kwargs)
+    msg: str
 
+    def __init__(self, **kwargs) -> None:
+        format_values = kwargs.get("audit", {}).get("details", kwargs)
+
+        try:
+            formatted_msg = self.msg.format(**format_values)
+        except (KeyError, AttributeError, IndexError) as e:
+            keys = list(format_values.keys())
+            formatted_msg = f"{type(e)}: {self.msg} | Missing context: {keys}"
+
+        self.params = kwargs
         super().__init__(formatted_msg)
-        self.msg = formatted_msg
 
 
 class BlockedTransition(StateMachineError):
