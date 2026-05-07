@@ -1,12 +1,12 @@
 import itertools
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum, IntEnum, StrEnum, auto
 from inspect import isawaitable
 from types import MappingProxyType
-from typing import TypedDict
+from typing import ClassVar
 from exceptions import (
     ActionError,
     BlockedTransition,
@@ -33,13 +33,17 @@ type ProxyTransitionMap[S, E, C] = MappingProxyType[
 
 
 class InternalEvent(Enum):
+    EXCEPTION = auto()
     EVENT_TRIGGER = auto()
     ACTION_EXECUTE = auto()
     GUARD_SKIP = auto()
     GUARD_EVALUATE = auto()
+    ON_ENTRY = auto()
+    ON_EXIT = auto()
+    ON_TRANSITION = auto()
     STATE_CHANGE = auto()
+    TRANSITION_START = auto()
     TRANSITION_COMPLETE = auto()
-    EXCEPTION = auto()
 
 
 class ReserveredEvent(Enum):
@@ -47,16 +51,17 @@ class ReserveredEvent(Enum):
     ERROR = auto()
 
 
-class AuditDetails[S: Enum, E: Enum, C](TypedDict, total=False):
-    source: S
-    target: S
-    event: E
-    action: Action[C]
-    action_type: str
-    guard: Guard[C]
-    passed: bool
-    error_type: str
-    error_message: str
+@dataclass(slots=True)
+class AuditDetails[S: Enum, E: Enum, C]:
+    source: S | None = None
+    target: S | None = None
+    event: E | None = None
+    action: Action[C] | None = None
+    action_type: str | None = None
+    guard: Guard[C] | None = None
+    passed: bool | None = None
+    error_type: str | None = None
+    error_message: str | None = None
 
 
 @dataclass(slots=True)
@@ -68,38 +73,32 @@ class AuditRecord[S: Enum, E: Enum, C]:
 
 
 def _format_audit_log(record: AuditRecord) -> str:
-    detail_str = ""
     details = record.details
     timestamp = record.timestamp.strftime("%H:%M:%S")
+    line = f"[{timestamp}] <{record.machine}> {record.event:<20} | Source: {details.source}"
 
-    line = f"[{timestamp}] <{record.machine}> {record.event:<20} | Source: {details.get('source')}"
-
+    detail_str = ""
     if InternalEvent.EVENT_TRIGGER.name in record.event:
-        detail_str = f" Event: {details.get('event')}"
-    elif "guard" in details:
-        res = "PASS" if details.get("passed") else "FAIL"
-        detail_str = f" Guard: {details.get('guard')} [{res}]"
-    elif "action" in details:
-        detail_str = f" Action [{details.get('action_type')}]: {details.get('action')}"
-    elif "target" in details and record.event != "GUARD_SKIP":
-        detail_str = f" -> Target: {details['target']}"
-    elif "error_message" in details:
-        detail_str = (
-            f" Exception: <{details.get('error_type')}> {details.get('error_message')}"
-        )
+        detail_str += f" Event: {details.event}"
+    if details.target and record.event != InternalEvent.GUARD_SKIP.name:
+        detail_str += f" -> Target: {details.target}"
+    if details.action:
+        detail_str += f" Action [{details.action_type}]: {details.action}"
+    if details.guard:
+        res = "PASS" if details.passed else "FAIL"
+        detail_str += f" Guard [{res}]: {details.guard}"
+    if details.error_message:
+        detail_str += f" Exception [{details.error_type}]: {details.error_message}"
 
     return f"{line}{detail_str}"
 
 
 class StateMachineMixin[S: Enum, E: Enum, C]:
     __slots__ = ()
-
     _name: str
-    # _state: S
     _transitions: ProxyTransitionMap[S, E, C]
-    # _on_entry: ProxyEntryExitAction[S, C]
-    # _on_exit: ProxyEntryExitAction[S, C]
     _audit: deque[AuditRecord]
+    _verbose: bool
 
     def get_state_events(self, state: S) -> list[E]:
         return [event for (s, event) in self._transitions.keys() if s == state]
@@ -116,8 +115,8 @@ class StateMachineMixin[S: Enum, E: Enum, C]:
 
     def _dispatch_audit(self, machine_event: InternalEvent, **kwargs) -> None:
         record = self._record_audit(machine_event, **kwargs)
-        # if self._logger:
-        print(_format_audit_log(record))
+        if self._verbose:
+            print(_format_audit_log(record))
 
     def _get_name(self, obj) -> str:
         return getattr(obj, "__name__", type(obj).__name__)
@@ -128,10 +127,10 @@ class StateMachineMixin[S: Enum, E: Enum, C]:
             if key in kwargs:
                 kwargs[key] = self._get_name(kwargs[key])
 
-        record = AuditRecord(
+        record = AuditRecord[S, E, C](
             machine=self._name,
             event=machine_event.name,
-            details=AuditDetails(**kwargs),
+            details=AuditDetails[S, E, C](**kwargs),
         )
 
         self._audit.append(record)
@@ -148,7 +147,7 @@ class StateMachineMixin[S: Enum, E: Enum, C]:
                 error_type=InvalidTransition.__name__,
                 error_message=f"No transition map registered for {event}",
             )
-            raise InvalidTransition(audit=self._audit[-1])
+            raise InvalidTransition(audit=asdict(self._audit[-1]))
 
         return transitions
 
@@ -162,6 +161,7 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
     _on_exit: ProxyEntryExitAction[S, C]
     _on_transition: ProxyTransitionAction[S, C]
     _audit: deque[AuditRecord] = field(default_factory=lambda: deque(maxlen=MAX_AUDIT))
+    _verbose: bool = False
 
     def trigger(self, event: E, context: C) -> dict[str, S | E]:
         source_state = self._state
@@ -171,6 +171,13 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
 
         transitions = self._resolve_transitions(event)
         target_state, action = self._execute_guard(event, context, transitions)
+
+        self._dispatch_audit(
+            InternalEvent.TRANSITION_START,
+            source=source_state,
+            target=target_state,
+            event=event,
+        )
 
         self._execute_on_exit(event, context)
         self._execute_transition_action(event, action, context)
@@ -194,7 +201,7 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
             self._dispatch_audit(
                 InternalEvent.GUARD_EVALUATE,
                 source=self._state,
-                target=target_state,
+                # target=target_state,
                 event=event,
                 guard=guard,
                 passed=passed,
@@ -204,13 +211,13 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
             self._dispatch_audit(
                 InternalEvent.EXCEPTION,
                 source=self._state,
-                target=target_state,
+                # target=target_state,
                 event=event,
                 guard=guard,
                 error_type=GuardError.__name__,
-                error_message=f"{type(e).__name__}: {e}",
+                error_message=f"<{type(e).__name__}>: {e}",
             )
-            raise GuardError(audit=self._audit[-1]) from e
+            raise GuardError(audit=asdict(self._audit[-1])) from e
 
     def _execute_guard(
         self,
@@ -240,7 +247,7 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
             error_type=BlockedTransition.__name__,
             error_message=f"No guards passed for event {event}",
         )
-        raise BlockedTransition(audit=self._audit[-1])
+        raise BlockedTransition(audit=asdict(self._audit[-1]))
 
     def _execute_on_entry(self, event: E, context: C) -> None:
         self._run_actions(
@@ -288,9 +295,9 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
                 action=action,
                 action_type=action_type,
                 error_type=ActionError.__name__,
-                error_message=f"{type(e).__name__}: {e}",
+                error_message=f"<{type(e).__name__}>: {e}",
             )
-            raise ActionError(audit=self._audit[-1]) from e
+            raise ActionError(audit=asdict(self._audit[-1])) from e
 
     def _run_actions(
         self,
@@ -313,6 +320,7 @@ class AsyncStateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
     _on_exit: ProxyEntryExitAction[S, C]
     _on_transition: ProxyTransitionAction[S, C]
     _audit: deque[AuditRecord] = field(default_factory=lambda: deque(maxlen=MAX_AUDIT))
+    _verbose: bool = False
 
     async def trigger(self, event: E, context: C) -> dict[str, S | E]:
         source_state = self._state
@@ -322,6 +330,13 @@ class AsyncStateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
 
         transitions = self._resolve_transitions(event)
         target_state, action = await self._execute_guard(event, context, transitions)
+
+        self._dispatch_audit(
+            InternalEvent.TRANSITION_START,
+            source=source_state,
+            target=target_state,
+            event=event,
+        )
 
         await self._execute_on_exit(event, context)
         await self._execute_transition_action(event, action, context)
@@ -346,7 +361,7 @@ class AsyncStateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
             self._dispatch_audit(
                 InternalEvent.GUARD_EVALUATE,
                 source=self._state,
-                target=target_state,
+                # target=target_state,
                 event=event,
                 guard=guard,
                 passed=passed,
@@ -356,13 +371,13 @@ class AsyncStateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
             self._dispatch_audit(
                 InternalEvent.EXCEPTION,
                 source=self._state,
-                target=target_state,
+                # target=target_state,
                 event=event,
                 guard=guard,
                 error_type=GuardError.__name__,
-                error_message=f"{type(e).__name__}: {e}",
+                error_message=f"<{type(e).__name__}>: {e}",
             )
-            raise GuardError(audit=self._audit[-1]) from e
+            raise GuardError(audit=asdict(self._audit[-1])) from e
 
     async def _execute_guard(
         self,
@@ -392,7 +407,7 @@ class AsyncStateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
             error_type=BlockedTransition.__name__,
             error_message=f"No guards passed for event {event}",
         )
-        raise BlockedTransition(audit=self._audit[-1])
+        raise BlockedTransition(audit=asdict(self._audit[-1]))
 
     async def _execute_on_entry(self, event: E, context: C) -> None:
         await self._run_actions(
@@ -443,9 +458,9 @@ class AsyncStateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
                 action=action,
                 action_type=action_type,
                 error_type=ActionError.__name__,
-                error_message=f"{type(e).__name__}: {e}",
+                error_message=f"<{type(e).__name__}>: {e}",
             )
-            raise ActionError(audit=self._audit[-1]) from e
+            raise ActionError(audit=asdict(self._audit[-1])) from e
 
     async def _run_actions(
         self,
@@ -461,17 +476,25 @@ class AsyncStateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
 
 @dataclass(slots=True)
 class StateMachineBuilder[S: Enum, E: Enum, C]:
-    _events: set[E] = field(default_factory=set)
-    _states: set[S] = field(default_factory=set)
-    _transitions: TransitionMap[S, E, C] = field(default_factory=dict)
-    _on_entry: EntryExitAction[S, C] = field(default_factory=dict)
-    _on_exit: EntryExitAction[S, C] = field(default_factory=dict)
-    _on_transition: TransitionAction[S, C] = field(default_factory=dict)
-    _counter = itertools.count(start=1)
+    _events: set[E] = field(default_factory=set, init=False)
+    _states: set[S] = field(default_factory=set, init=False)
+    _transitions: TransitionMap[S, E, C] = field(default_factory=dict, init=False)
+    _on_entry: EntryExitAction[S, C] = field(default_factory=dict, init=False)
+    _on_exit: EntryExitAction[S, C] = field(default_factory=dict, init=False)
+    _on_transition: TransitionAction[S, C] = field(default_factory=dict, init=False)
+    _logger: Callable | None = field(default=None, init=False)
+    _counter: ClassVar = itertools.count(start=1)
 
     @classmethod
-    def get_name(cls, base_name="SM"):
+    def _get_name(cls, base_name: str = "SM"):
         return f"{base_name}_{next(cls._counter)}"
+
+    def add_logger(
+        self, logger: Callable | None = None
+    ) -> "StateMachineBuilder[S, E, C]":
+        if callable(logger):
+            self._logger = logger
+        return self
 
     def add_transition(
         self,
@@ -510,23 +533,27 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
     def build(
         self, initial_state: S, name: str | None = None, verbose: bool = False
     ) -> StateMachine[S, E, C]:
-        name = name if name else self.get_name()
+        name = name if name else StateMachineBuilder._get_name()
 
         self._states.add(initial_state)
         self._validate_model(name, initial_state)
         sm_settings = self._prepare_immutables()
 
-        return StateMachine(_name=name, _state=initial_state, **sm_settings)
+        return StateMachine(
+            _name=name, _state=initial_state, _verbose=verbose, **sm_settings
+        )
 
     def build_async(
         self, initial_state: S, name: str | None = None, verbose: bool = False
     ) -> AsyncStateMachine[S, E, C]:
-        name = name if name else self.get_name()
+        name = name if name else StateMachineBuilder._get_name()
 
         self._validate_model(name, initial_state)
         sm_settings = self._prepare_immutables()
 
-        return AsyncStateMachine(_name=name, _state=initial_state, **sm_settings)
+        return AsyncStateMachine(
+            _name=name, _state=initial_state, _verbose=verbose, **sm_settings
+        )
 
     def _prepare_immutables(self) -> dict:
         template = dict(
