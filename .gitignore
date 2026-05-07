@@ -1,0 +1,8 @@
+backup/
+__pycache__/
+.venv/
+
+project.md
+*.log
+*.swp
+
