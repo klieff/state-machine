@@ -10,7 +10,7 @@ from sm_core import (
     InvalidState,
     InvalidTransition,
     StateMachine,
-    StateMachineModel,
+    StateMachineBuilder,
     TransitionMapError,
     auto,
 )
@@ -39,7 +39,7 @@ class Context:
 
 
 def test_initial_state():
-    sm = StateMachineModel[State, Event, Context]()
+    sm = StateMachineBuilder[State, Event, Context]()
     # .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE)
 
     try:
@@ -60,9 +60,9 @@ def test_dead_state_exit():
         result.append(True)
 
     sm = (
-        StateMachineModel[State, Event, Context]()
+        StateMachineBuilder[State, Event, Context]()
         .add_transition(State.OFFLINE, Event.CONNECT, State.OFFLINE)
-        .add_exit(State.OFFLINE, test_on_exit)
+        .on_exit(State.OFFLINE, test_on_exit)
         .build(initial_state=State.OFFLINE, verbose=True)
     )
 
@@ -75,7 +75,7 @@ def test_valid_transition():
         pass
 
     sm = (
-        StateMachineModel[State, Event, StateMachine]()
+        StateMachineBuilder[State, Event, StateMachine]()
         .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE, action=test_action)
         .build(initial_state=State.OFFLINE, verbose=True)
     )
@@ -86,7 +86,7 @@ def test_valid_transition():
 
 def test_invalid_transition_error():
     sm = (
-        StateMachineModel[State, Event, Context]()
+        StateMachineBuilder[State, Event, Context]()
         .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE)
         .build(initial_state=State.OFFLINE, verbose=True)
     )
@@ -108,7 +108,7 @@ def test_transition_guards():
         return False
 
     sm = (
-        StateMachineModel[State, Event, StateMachine]()
+        StateMachineBuilder[State, Event, StateMachine]()
         .add_transition(
             State.OFFLINE, Event.CONNECT, State.ONLINE, guard=test_guard_pass
         )
@@ -138,11 +138,15 @@ def test_entry_exit_actions():
     def test_enter_action(ctx):
         results.append("entered_online")
 
+    def test_on_transition(ctx):
+        print("Hello from ON_TRANSITION")
+
     sm = (
-        StateMachineModel[State, Event, StateMachine]()
+        StateMachineBuilder[State, Event, StateMachine]()
         .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE)
-        .add_exit(State.OFFLINE, test_exit_action)
-        .add_entry(State.ONLINE, test_enter_action)
+        .on_exit(State.OFFLINE, test_exit_action)
+        .on_entry(State.ONLINE, test_enter_action)
+        .on_transition(State.OFFLINE, State.ONLINE, test_on_transition)
         .build(initial_state=State.OFFLINE, verbose=True)
     )
 
@@ -153,7 +157,7 @@ def test_entry_exit_actions():
 
 
 def test_empty_map_error():
-    sm = StateMachineModel[State, Event, Context]()
+    sm = StateMachineBuilder[State, Event, Context]()
 
     try:
         sm.build(initial_state=State.OFFLINE, verbose=True)
@@ -167,7 +171,7 @@ def test_empty_map_error():
 
 def test_state_machine_immutability():
     sm = (
-        StateMachineModel[State, Event, Context]()
+        StateMachineBuilder[State, Event, Context]()
         .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE)
         .build(initial_state=State.OFFLINE, verbose=True)
     )
@@ -197,10 +201,10 @@ def test_async_exit_entry_actions():
         results.append(ctx.name)
 
     sm_rules = (
-        StateMachineModel[State, Event, SimpleNamespace]()
+        StateMachineBuilder[State, Event, SimpleNamespace]()
         .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE)
-        .add_exit(State.OFFLINE, test_async_exit_action)
-        .add_entry(State.ONLINE, test_async_enter_action)
+        .on_exit(State.OFFLINE, test_async_exit_action)
+        .on_entry(State.ONLINE, test_async_enter_action)
     )
     sm = sm_rules.build_async(initial_state=State.OFFLINE, name="SM_1", verbose=True)
     sm2 = sm_rules.build_async(initial_state=State.OFFLINE, name="SM_2", verbose=True)
