@@ -16,3 +16,20 @@
 * Self-transitions
   * Internal transitions: not leaving the state
   * External self-transitions: exits and re-enters state
+
+## Builder methods
+
+* `.add_transition`: defines topology
+* `.on_transition`: defines global transition observers
+* `.on_exit` and `.on_entry`: define lifecycle callbacks
+
+Other interesting on_methods:
+
+* `.on_failure(...)`
+* `.on_invalid_transition(...)`
+* `.on_guard_rejected(...)`
+* `.on_before_transition(...)`
+* `.on_after_transition(...)`
+* `.on_error(..)`
+* `.on_enter_any(..)`
+* `.on_final_state(..)`
