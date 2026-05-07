@@ -139,7 +139,7 @@ def test_entry_exit_actions():
         results.append("entered_online")
 
     def test_on_transition(ctx):
-        print("Hello from ON_TRANSITION")
+        results.append("on_transition")
 
     sm = (
         StateMachineBuilder[State, Event, StateMachine]()
@@ -151,7 +151,7 @@ def test_entry_exit_actions():
     )
 
     sm.trigger(Event.CONNECT, sm)
-    assert results == ["exited_offline", "entered_online"], (
+    assert results == ["exited_offline", "entered_online", "on_transition"], (
         "Actions fired in wrong order"
     )
 
@@ -175,10 +175,9 @@ def test_state_machine_immutability():
         .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE)
         .build(initial_state=State.OFFLINE, verbose=True)
     )
-
     try:
         sm._transitions["default"] = 123  # type: ignore
-        sm._state = State.RECOVERING  # type: ignore
+        sm._state = State.RECOVERING
     except TypeError as e:
         return e
     except AttributeError as e:
@@ -239,7 +238,7 @@ def run_tests():
         (test_valid_transition, "VALID TRANSITION WITH ACTION"),
         (test_invalid_transition_error, "INVALID TRANSITION ERROR"),
         (test_transition_guards, "ENABLING & BLOCKING GUARDS"),
-        (test_entry_exit_actions, "ENTRY & EXIT ACTIONS"),
+        (test_entry_exit_actions, "ON ENTRY/EXIT/TRANSITION ACTIONS"),
         (test_empty_map_error, "EMPTY TRANSITION MAP ERROR"),
         (test_state_machine_immutability, "STATE MACHINE WEAK IMMUTABILITY"),
         (test_async_exit_entry_actions, "ASYNCHRONOUS EXIT & ENTRY ACTIONS"),
