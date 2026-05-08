@@ -1,4 +1,4 @@
-class StateMachineError(Exception):
+class StateMachineException(Exception):
     msg: str
 
     def __init__(self, **kwargs) -> None:
@@ -14,28 +14,35 @@ class StateMachineError(Exception):
         super().__init__(formatted_msg)
 
 
-class BlockedTransition(StateMachineError):
+class BlockedTransition(StateMachineException):
     msg = "Transitions from state '{source}' on event '{event}' were blocked by guards."
 
 
-class InvalidTransition(StateMachineError):
+class InvalidTransition(StateMachineException):
     msg = "No transition map registered for event '{event}' on state '{source}'"
 
 
-class ActionError(StateMachineError):
+class ActionError(StateMachineException):
     msg = "Critical failure in {action_type} action '{action}' (State: {source} Event: {event})"
 
 
-class GuardError(StateMachineError):
+class GuardError(StateMachineException):
     msg = "Critical failure in guard '{guard}' (State: {source} Event: {event})"
 
 
-class InvalidState(StateMachineError):
+class InvalidState(StateMachineException):
     msg = "No transition map found for initial state '{initial_state}'"
 
 
-class TransitionMapError(StateMachineError):
+class TransitionMapError(StateMachineException):
     msg = (
         "StateMachine '{machine_name}' cannot be built with an empty transition map. "
         "Ensure at least one transition is added before calling build()."
+    )
+
+
+class UninitializedError(StateMachineException):
+    msg = (
+        "StateMachine '{machine_name}' has not been initialized. "
+        "Ensure start() is called before calling trigger()."
     )
