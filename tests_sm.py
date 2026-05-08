@@ -191,32 +191,44 @@ def test_state_machine_immutability():
 def test_async_exit_entry_actions():
     results = []
 
-    async def test_async_exit_action(ctx):
+    async def async_exit_action(ctx):
         await asyncio.sleep(ctx.time[0])
         results.append(ctx.name)
 
-    async def test_async_enter_action(ctx):
+    async def async_enter_action(ctx):
         await asyncio.sleep(ctx.time[1])
         results.append(ctx.name)
+
+    def test_guard_sync(ctx):
+        print("Waiting for sync function...")
+        time.sleep(2)
+        results.append(ctx.name)
+        return True
+
+    async def test_guard_async(ctx):
+        print("Waiting for async function...")
+        await asyncio.sleep(ctx.time[1])
+        return False
 
     sm_rules = (
         StateMachineBuilder[State, Event, SimpleNamespace]()
         .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE)
-        .on_exit(State.OFFLINE, test_async_exit_action)
-        .on_entry(State.ONLINE, test_async_enter_action)
+        .on_exit(State.OFFLINE, async_exit_action)
+        .on_entry(State.ONLINE, async_enter_action)
     )
     sm = sm_rules.build_async(initial_state=State.OFFLINE, name="SM_1", verbose=True)
     sm2 = sm_rules.build_async(initial_state=State.OFFLINE, name="SM_2", verbose=True)
     sm3 = sm_rules.build_async(initial_state=State.OFFLINE, name="SM_3", verbose=True)
 
     async def run_async_tests():
-        ctx = SimpleNamespace(time=(1, 2), name=sm._name, state=sm._state.name)
-        ctx2 = SimpleNamespace(time=(0.5, 1.1), name=sm2._name, state=sm2._state.name)
-        ctx3 = SimpleNamespace(time=(1.5, 2.5), name=sm3._name, state=sm3._state.name)
+        ctx = SimpleNamespace(time=(1, 2), name=sm._name)
+        ctx2 = SimpleNamespace(time=(0.5, 1.25), name=sm2._name)
+        ctx3 = SimpleNamespace(time=(1.5, 2.5), name=sm3._name)
         await asyncio.gather(
             sm.trigger(Event.CONNECT, ctx),
             sm2.trigger(Event.CONNECT, ctx2),
             sm3.trigger(Event.CONNECT, ctx3),
+            return_exceptions=True,
         )
 
     start_time = time.perf_counter()
