@@ -2,7 +2,7 @@ class StateMachineError(Exception):
     msg: str
 
     def __init__(self, **kwargs) -> None:
-        format_values = kwargs.get("audit", {}).get("details", kwargs)
+        format_values = kwargs.get("record", {}).get("details", kwargs)
 
         try:
             formatted_msg = self.msg.format(**format_values)
