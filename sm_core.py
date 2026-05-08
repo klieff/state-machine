@@ -483,9 +483,7 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
     def _get_name(cls, base_name: str = "SM"):
         return f"{base_name}_{next(cls._counter)}"
 
-    def add_audit_sink(
-        self, audit_sink: Callable | None = None
-    ) -> "StateMachineBuilder[S, E, C]":
+    def add_audit_sink(self, audit_sink: Callable) -> "StateMachineBuilder[S, E, C]":
         if callable(audit_sink):
             self._audit_sink = audit_sink
         return self
@@ -531,10 +529,10 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
 
         self._states.add(initial_state)
         self._validate_model(name, initial_state)
-        sm_settings = self._prepare_immutables()
+        sm_params = self._prepare_immutables()
 
         return StateMachine(
-            _name=name, _state=initial_state, _verbose=verbose, **sm_settings
+            _name=name, _state=initial_state, _verbose=verbose, **sm_params
         )
 
     def build_async(
@@ -542,11 +540,12 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
     ) -> AsyncStateMachine[S, E, C]:
         name = name if name else StateMachineBuilder._get_name()
 
+        self._states.add(initial_state)
         self._validate_model(name, initial_state)
-        sm_settings = self._prepare_immutables()
+        sm_params = self._prepare_immutables()
 
         return AsyncStateMachine(
-            _name=name, _state=initial_state, _verbose=verbose, **sm_settings
+            _name=name, _state=initial_state, _verbose=verbose, **sm_params
         )
 
     def _prepare_immutables(self) -> dict:
