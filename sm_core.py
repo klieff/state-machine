@@ -16,7 +16,7 @@ from exceptions import (
     TransitionMapError,
 )
 
-MAX_EVENTLOG = 200
+MAX_EVENT_LOG = 200
 
 type Action[C] = Callable[[C], Awaitable[None] | None]
 type Guard[C] = Callable[[C], Awaitable[bool] | bool]
@@ -69,13 +69,13 @@ class EventDetails[S: Enum, E: Enum, C]:
 class EventRecord[S: Enum, E: Enum, C]:
     machine: str
     machine_event: str
-    details: EventDetails[S, E, C] = field(default_factory=EventDetails)
+    details: EventDetails[S, E, C]  # = field(default_factory=EventDetails)
     timestamp: datetime = field(default_factory=datetime.now)
 
 
-def _format_eventlog(record: EventRecord) -> str:
+def _format_event_log(record: EventRecord) -> str:
     details = record.details
-    timestamp = record.timestamp.strftime("%H:%M:%S")
+    timestamp = record.timestamp.strftime("%H:%M:%S.%f")[:-3]
     line = f"[{timestamp}] <{record.machine}> {record.machine_event:<20} | Source: {details.source}"
 
     detail_str = ""
@@ -97,61 +97,65 @@ def _format_eventlog(record: EventRecord) -> str:
 class StateMachineMixin[S: Enum, E: Enum, C]:
     __slots__ = ()
     _name: str
-    _transitions: ProxyTransitionMap[S, E, C]
-    _eventlog: deque[EventRecord]
+    _state: S
+    _event: E | None
+    _target: S | None
     _verbose: bool
+    _transitions: ProxyTransitionMap[S, E, C]
+    _event_log: deque[EventRecord]
 
     def get_state_events(self, state: S) -> list[E]:
         return [event for (s, event) in self._transitions.keys() if s == state]
 
-    def _apply_transition(self, event: E, target_state: S) -> None:
+    def _apply_transition(self, target_state: S) -> None:
         source_state = self._state
         self._state = target_state
-        self._dispatch_eventlog(
+        self._dispatch_event(
             machine_event=InternalEvent.STATE_CHANGE,
             source=source_state,
             target=target_state,
-            event=event,
         )
 
-    def _dispatch_eventlog(self, machine_event: InternalEvent, **kwargs) -> None:
-        record = self._record_eventlog(machine_event, **kwargs)
+    def _dispatch_event(self, machine_event: InternalEvent, **kwargs) -> EventRecord:
+        record = self._record_event(machine_event, **kwargs)
         if self._verbose:
-            print(_format_eventlog(record))
+            print(_format_event_log(record))
+        return record
 
     def _get_name(self, obj) -> str:
         name = getattr(obj, "name", None)
         return name or getattr(obj, "__name__", type(obj).__name__)
 
-    def _record_eventlog(
+    def _record_event(
         self, machine_event: InternalEvent, **kwargs
     ) -> EventRecord[S, E, C]:
-        func_keys = frozenset(("action", "action_type", "guard"))
-        for key in func_keys:
-            if key in kwargs:
-                kwargs[key] = self._get_name(kwargs[key])
+        details = EventDetails[S, E, C](
+            source=self._state, target=self._target, event=self._event
+        )
+        for key, value in kwargs.items():
+            if key in {"action", "action_type", "guard", "error_type"}:
+                value = self._get_name(value)
+            setattr(details, key, value)
 
         record = EventRecord[S, E, C](
             machine=self._name,
             machine_event=machine_event.name,
-            details=EventDetails[S, E, C](**kwargs),
+            details=details,
         )
 
-        self._eventlog.append(record)
+        self._event_log.append(record)
         return record
 
     def _resolve_transitions(
         self, event: E
     ) -> tuple[tuple[S, Action[C] | None, Guard[C] | None], ...]:
         if not (transitions := self._transitions.get((self._state, event))):
-            self._dispatch_eventlog(
+            self._dispatch_event(
                 machine_event=InternalEvent.EXCEPTION,
-                source=self._state,
-                event=event,
-                error_type=InvalidTransition.__name__,
-                error_message=f"No transition map registered for {event}",
+                error_type=InvalidTransition,
+                error_message=f"No transition map registered for {self._event}",
             )
-            raise InvalidTransition(record=asdict(self._eventlog[-1]))
+            raise InvalidTransition(event_record=asdict(self._event_log[-1]))
 
         return transitions
 
@@ -164,129 +168,100 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
     _on_entry: ProxyEntryExitAction[S, C]
     _on_exit: ProxyEntryExitAction[S, C]
     _on_transition: ProxyTransitionAction[S, C]
-    _eventlog: deque[EventRecord] = field(
-        default_factory=lambda: deque(maxlen=MAX_EVENTLOG)
+    _event_log: deque[EventRecord] = field(
+        default_factory=lambda: deque(maxlen=MAX_EVENT_LOG)
     )
+    _event: E | None = None
+    _target: S | None = None
     _verbose: bool = False
 
     def trigger(self, event: E, context: C) -> dict[str, S | E]:
+        self._event = event
+        self._dispatch_event(machine_event=InternalEvent.EVENT_TRIGGER)
+
         source_state = self._state
-        self._dispatch_eventlog(
-            machine_event=InternalEvent.EVENT_TRIGGER, event=event, source=self._state
-        )
-
         transitions = self._resolve_transitions(event)
-        target_state, action = self._evaluate_guards(event, context, transitions)
+        target_state, action = self._evaluate_guards(context, transitions)
 
-        self._dispatch_eventlog(
-            machine_event=InternalEvent.TRANSITION_START,
-            source=source_state,
-            target=target_state,
-            event=event,
-        )
+        self._dispatch_event(machine_event=InternalEvent.TRANSITION_START)
 
-        self._execute_on_exit(event, context)
-        self._execute_transition_action(event, action, context)
-        self._apply_transition(event, target_state)
-        self._execute_on_entry(event, context)
-        self._execute_on_transition(source_state, event, target_state, context)
+        self._execute_on_exit(context)
+        self._execute_transition_action(action, context)
+        self._apply_transition(target_state)
+        self._execute_on_entry(context)
+        self._execute_on_transition(source_state, target_state, context)
 
-        self._dispatch_eventlog(
+        self._dispatch_event(
             machine_event=InternalEvent.TRANSITION_COMPLETE,
             source=source_state,
             target=target_state,
-            event=event,
         )
         return dict(source=source_state, target=target_state, event=event)
 
-    def _execute_guard(
-        self, event: E, context: C, guard: Guard[C], target_state: S
-    ) -> bool | Awaitable[bool]:
+    def _execute_guard(self, guard: Guard[C], context: C) -> bool | Awaitable[bool]:
         try:
             passed = guard(context)
-            self._dispatch_eventlog(
-                machine_event=InternalEvent.GUARD_EVALUATE,
-                source=self._state,
-                # target=target_state,
-                event=event,
-                guard=guard,
-                passed=passed,
+            self._dispatch_event(
+                machine_event=InternalEvent.GUARD_EVALUATE, guard=guard, passed=passed
             )
             return passed
         except Exception as e:
-            self._dispatch_eventlog(
+            event_record = self._dispatch_event(
                 machine_event=InternalEvent.EXCEPTION,
-                source=self._state,
-                # target=target_state,
-                event=event,
                 guard=guard,
-                error_type=GuardError.__name__,
+                error_type=GuardError,
                 error_message=f"<{type(e).__name__}>: {e}",
             )
-            raise GuardError(record=asdict(self._eventlog[-1])) from e
+            raise GuardError(event_record=asdict(event_record)) from e
 
     def _evaluate_guards(
         self,
-        event: E,
         context: C,
         transitions: tuple[tuple[S, Action[C] | None, Guard[C] | None], ...],
     ) -> tuple[S, Action[C] | None]:
 
         for target_state, action, guard in transitions:
+            self._target = target_state
             if guard is None:
                 if len(transitions) > 1:
-                    self._dispatch_eventlog(
-                        machine_event=InternalEvent.GUARD_SKIP,
-                        source=self._state,
-                        target=target_state,
-                        event=event,
-                    )
+                    self._dispatch_event(machine_event=InternalEvent.GUARD_SKIP)
                 return (target_state, action)
 
-            if self._execute_guard(event, context, guard, target_state):
+            if self._execute_guard(guard, context):
                 return (target_state, action)
 
-        self._dispatch_eventlog(
+        event_record = self._dispatch_event(
             machine_event=InternalEvent.EXCEPTION,
-            source=self._state,
-            event=event,
-            error_type=BlockedTransition.__name__,
-            error_message=f"No guards passed for event {event}",
+            error_type=BlockedTransition,
+            error_message=f"No guards passed for event {self._event}",
         )
-        raise BlockedTransition(record=asdict(self._eventlog[-1]))
+        raise BlockedTransition(event_record=asdict(event_record))
 
-    def _execute_on_entry(self, event: E, context: C) -> None:
+    def _execute_on_entry(self, context: C) -> None:
         self._run_actions(
-            event=event,
             context=context,
             actions=self._on_entry.get(self._state),
             action_type=InternalEvent.ON_ENTRY,
         )
 
-    def _execute_on_exit(self, event: E, context: C) -> None:
+    def _execute_on_exit(self, context: C) -> None:
         self._run_actions(
-            event=event,
             context=context,
             actions=self._on_exit.get(self._state),
             action_type=InternalEvent.ON_EXIT,
         )
 
-    def _execute_on_transition(
-        self, source_state: S, event: E, target_state: S, context: C
-    ) -> None:
+    def _execute_on_transition(self, source: S, target: S, context: C) -> None:
         self._run_actions(
-            event=event,
             context=context,
-            actions=self._on_transition.get((source_state, target_state)),
+            source=source,
+            actions=self._on_transition.get((source, target)),
             action_type=InternalEvent.ON_TRANSITION,
         )
 
-    def _execute_transition_action(
-        self, event: E, action: Action[C] | None, context: C
-    ) -> None:
+    def _execute_transition_action(self, action: Action[C] | None, context: C) -> None:
         if action:
             self._run_action(
-                event=event,
                 context=context,
                 action=action,
                 action_type=InternalEvent.TRANSITION_ACTION,
@@ -294,43 +269,44 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
 
     def _run_action(
         self,
-        event: E,
         context: C,
         action: Action[C],
         action_type: InternalEvent,
+        source: S | None = None,
     ) -> None:
         try:
             action(context)
-            self._dispatch_eventlog(
+            self._dispatch_event(
                 machine_event=action_type,
-                source=self._state,
-                event=event,
+                source=source or self._state,
                 action=action,
                 action_type=action_type,
             )
         except Exception as e:
-            self._dispatch_eventlog(
+            event_record = self._dispatch_event(
                 machine_event=InternalEvent.EXCEPTION,
-                source=self._state,
-                event=event,
+                source=source or self._state,
                 action=action,
                 action_type=action_type,
-                error_type=ActionError.__name__,
+                error_type=ActionError,
                 error_message=f"<{type(e).__name__}>: {e}",
             )
-            raise ActionError(record=asdict(self._eventlog[-1])) from e
+            raise ActionError(event_record=asdict(event_record)) from e
 
     def _run_actions(
         self,
-        event: E,
         context: C,
         actions: Iterable[Action[C]] | None,
         action_type: InternalEvent,
+        source: S | None = None,
     ) -> None:
         if actions:
             for action in actions:
                 self._run_action(
-                    event=event, context=context, action=action, action_type=action_type
+                    context=context,
+                    action=action,
+                    action_type=action_type,
+                    source=source,
                 )
 
 
@@ -342,173 +318,153 @@ class AsyncStateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
     _on_entry: ProxyEntryExitAction[S, C]
     _on_exit: ProxyEntryExitAction[S, C]
     _on_transition: ProxyTransitionAction[S, C]
-    _eventlog: deque[EventRecord] = field(
-        default_factory=lambda: deque(maxlen=MAX_EVENTLOG)
+    _event_log: deque[EventRecord] = field(
+        default_factory=lambda: deque(maxlen=MAX_EVENT_LOG)
     )
+    _event: E | None = None
+    _target: S | None = None
     _verbose: bool = False
 
     async def trigger(self, event: E, context: C) -> dict[str, S | E]:
+        self._event = event
+        self._dispatch_event(machine_event=InternalEvent.EVENT_TRIGGER)
+
         source_state = self._state
-        self._dispatch_eventlog(
-            machine_event=InternalEvent.EVENT_TRIGGER, event=event, source=self._state
-        )
-
         transitions = self._resolve_transitions(event)
-        target_state, action = await self._evaluate_guards(event, context, transitions)
+        target_state, action = await self._evaluate_guards(context, transitions)
 
-        self._dispatch_eventlog(
-            machine_event=InternalEvent.TRANSITION_START,
-            source=source_state,
-            target=target_state,
-            event=event,
-        )
+        self._dispatch_event(machine_event=InternalEvent.TRANSITION_START)
 
-        await self._execute_on_exit(event, context)
-        await self._execute_transition_action(event, action, context)
-        self._apply_transition(event, target_state)
-        await self._execute_on_entry(event, context)
-        await self._execute_on_transition(source_state, event, target_state, context)
+        await self._execute_on_exit(context)
+        await self._execute_transition_action(action, context)
+        self._apply_transition(target_state)
+        await self._execute_on_entry(context)
+        await self._execute_on_transition(source_state, target_state, context)
 
-        self._dispatch_eventlog(
+        self._dispatch_event(
             machine_event=InternalEvent.TRANSITION_COMPLETE,
             source=source_state,
             target=target_state,
-            event=event,
         )
         return dict(source=source_state, target=target_state, event=event)
 
     async def _execute_guard(
-        self, event: E, context: C, guard: Guard[C], target_state: S
+        self, guard: Guard[C], context: C
     ) -> bool | Awaitable[bool]:
         try:
             result = guard(context)
             passed = await result if isawaitable(result) else result
-            self._dispatch_eventlog(
-                machine_event=InternalEvent.GUARD_EVALUATE,
-                source=self._state,
-                # target=target_state,
-                event=event,
-                guard=guard,
-                passed=passed,
+            self._dispatch_event(
+                machine_event=InternalEvent.GUARD_EVALUATE, guard=guard, passed=passed
             )
             return passed
         except Exception as e:
-            self._dispatch_eventlog(
+            event_record = self._dispatch_event(
                 machine_event=InternalEvent.EXCEPTION,
-                source=self._state,
-                # target=target_state,
-                event=event,
                 guard=guard,
-                error_type=GuardError.__name__,
+                error_type=GuardError,
                 error_message=f"<{type(e).__name__}>: {e}",
             )
-            raise GuardError(record=asdict(self._eventlog[-1])) from e
+            raise GuardError(event_record=asdict(event_record)) from e
 
     async def _evaluate_guards(
         self,
-        event: E,
         context: C,
         transitions: tuple[tuple[S, Action[C] | None, Guard[C] | None], ...],
     ) -> tuple[S, Action[C] | None]:
 
         for target_state, action, guard in transitions:
+            self._target = target_state
             if guard is None:
                 if len(transitions) > 1:
-                    self._dispatch_eventlog(
-                        machine_event=InternalEvent.GUARD_SKIP,
-                        source=self._state,
-                        target=target_state,
-                        event=event,
-                    )
+                    self._dispatch_event(machine_event=InternalEvent.GUARD_SKIP)
                 return (target_state, action)
 
-            if await self._execute_guard(event, context, guard, target_state):
+            if await self._execute_guard(guard, context):
                 return (target_state, action)
 
-        self._dispatch_eventlog(
+        event_record = self._dispatch_event(
             machine_event=InternalEvent.EXCEPTION,
-            source=self._state,
-            event=event,
-            error_type=BlockedTransition.__name__,
-            error_message=f"No guards passed for event {event}",
+            error_type=BlockedTransition,
+            error_message=f"No guards passed for event {self._event}",
         )
-        raise BlockedTransition(record=asdict(self._eventlog[-1]))
+        raise BlockedTransition(event_record=asdict(event_record))
 
-    async def _execute_on_entry(self, event: E, context: C) -> None:
+    async def _execute_on_entry(self, context: C) -> None:
         await self._run_actions(
-            event=event,
             context=context,
             actions=self._on_entry.get(self._state),
             action_type=InternalEvent.ON_ENTRY,
         )
 
-    async def _execute_on_exit(self, event: E, context: C) -> None:
+    async def _execute_on_exit(self, context: C) -> None:
         await self._run_actions(
-            event=event,
             context=context,
             actions=self._on_exit.get(self._state),
             action_type=InternalEvent.ON_EXIT,
         )
 
-    async def _execute_on_transition(
-        self, source_state: S, event: E, target_state: S, context: C
-    ) -> None:
+    async def _execute_on_transition(self, source: S, target: S, context: C) -> None:
         await self._run_actions(
-            event=event,
             context=context,
-            actions=self._on_transition.get((source_state, target_state)),
+            source=source,
+            actions=self._on_transition.get((source, target)),
             action_type=InternalEvent.ON_TRANSITION,
         )
 
     async def _execute_transition_action(
-        self, event: E, action: Action[C] | None, context: C
+        self, action: Action[C] | None, context: C
     ) -> None:
         if action:
             await self._run_action(
-                event=event,
                 context=context,
                 action=action,
                 action_type=InternalEvent.TRANSITION_ACTION,
             )
 
     async def _run_action(
-        self, event: E, context: C, action: Action[C], action_type: InternalEvent
+        self,
+        context: C,
+        action: Action[C],
+        action_type: InternalEvent,
+        source: S | None = None,
     ) -> None:
         try:
             result = action(context)
             if isawaitable(result):
                 await result
 
-            self._dispatch_eventlog(
+            self._dispatch_event(
                 machine_event=action_type,
-                source=self._state,
-                event=event,
+                source=source or self._state,
                 action=action,
                 action_type=action_type,
             )
         except Exception as e:
-            self._dispatch_eventlog(
+            event_record = self._dispatch_event(
                 machine_event=InternalEvent.EXCEPTION,
-                source=self._state,
-                event=event,
+                source=source or self._state,
                 action=action,
                 action_type=action_type,
-                error_type=ActionError.__name__,
+                error_type=ActionError,
                 error_message=f"<{type(e).__name__}>: {e}",
             )
-            raise ActionError(record=asdict(self._eventlog[-1])) from e
+            raise ActionError(event_record=asdict(event_record)) from e
 
     async def _run_actions(
         self,
-        event: E,
         context: C,
         actions: Iterable[Action[C]] | None,
         action_type: InternalEvent,
+        source: S | None = None,
     ) -> None:
         if actions:
             for action in actions:
                 await self._run_action(
-                    event=event, context=context, action=action, action_type=action_type
+                    context=context,
+                    action=action,
+                    action_type=action_type,
+                    source=source,
                 )
 
 
