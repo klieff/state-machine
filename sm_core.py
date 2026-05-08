@@ -1,12 +1,13 @@
 import itertools
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
-from enum import Enum, IntEnum, StrEnum, auto
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from enum import Enum, auto
 from inspect import isawaitable
 from types import MappingProxyType
 from typing import ClassVar
+
 from exceptions import (
     ActionError,
     BlockedTransition,
@@ -14,6 +15,7 @@ from exceptions import (
     InvalidState,
     InvalidTransition,
     TransitionMapError,
+    UninitializedError,
 )
 
 MAX_EVENT_LOG = 200
@@ -23,20 +25,22 @@ type Guard[C] = Callable[[C], Awaitable[bool] | bool]
 type EntryExitAction[S, C] = dict[S, list[Action[C]]]
 type TransitionAction[S, C] = dict[tuple[S, S], list[Action[C]]]
 type TransitionMap[S, E, C] = dict[
-    tuple[S, E], list[tuple[S, Action[C] | None, Guard[C] | None]]
+    tuple[S, E | None], list[tuple[S, Action[C] | None, Guard[C] | None]]
 ]
 type ProxyEntryExitAction[S, C] = MappingProxyType[S, tuple[Action[C], ...]]
 type ProxyTransitionAction[S, C] = MappingProxyType[tuple[S, S], tuple[Action[C], ...]]
 type ProxyTransitionMap[S, E, C] = MappingProxyType[
-    tuple[S, E], tuple[tuple[S, Action[C] | None, Guard[C] | None], ...]
+    tuple[S, E | None], tuple[tuple[S, Action[C] | None, Guard[C] | None], ...]
 ]
 
 
 class InternalEvent(Enum):
+    MACHINE_START = auto()
     EVENT_TRIGGER = auto()
     TRANSITION_START = auto()
     TRANSITION_ACTION = auto()
     TRANSITION_COMPLETE = auto()
+    TRANSITION_FAIL = auto()
     GUARD_SKIP = auto()
     GUARD_EVALUATE = auto()
     ON_ENTRY = auto()
@@ -69,7 +73,7 @@ class EventDetails[S: Enum, E: Enum, C]:
 class EventRecord[S: Enum, E: Enum, C]:
     machine: str
     machine_event: str
-    details: EventDetails[S, E, C]  # = field(default_factory=EventDetails)
+    details: EventDetails[S, E, C]
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -104,8 +108,8 @@ class StateMachineMixin[S: Enum, E: Enum, C]:
     _transitions: ProxyTransitionMap[S, E, C]
     _event_log: deque[EventRecord]
 
-    def get_state_events(self, state: S) -> list[E]:
-        return [event for (s, event) in self._transitions.keys() if s == state]
+    # def get_state_events(self, state: S) -> list[E]:
+    #     return [event for (s, event) in self._transitions.keys() if s == state]
 
     def _apply_transition(self, target_state: S) -> None:
         source_state = self._state
@@ -147,9 +151,10 @@ class StateMachineMixin[S: Enum, E: Enum, C]:
         return record
 
     def _resolve_transitions(
-        self, event: E
-    ) -> tuple[tuple[S, Action[C] | None, Guard[C] | None], ...]:
-        if not (transitions := self._transitions.get((self._state, event))):
+        self, source: S, event: E | None
+    ) -> tuple[tuple[S, Action[C] | None, Guard[C] | None], ...] | None:
+        transitions = self._transitions.get((source, event))
+        if not transitions and event is not None:
             self._dispatch_event(
                 machine_event=InternalEvent.EXCEPTION,
                 error_type=InvalidTransition,
@@ -168,34 +173,73 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
     _on_entry: ProxyEntryExitAction[S, C]
     _on_exit: ProxyEntryExitAction[S, C]
     _on_transition: ProxyTransitionAction[S, C]
+    _event: E | None = None
+    _target: S | None = None
+    _initialized: bool = False
+    _verbose: bool = False
     _event_log: deque[EventRecord] = field(
         default_factory=lambda: deque(maxlen=MAX_EVENT_LOG)
     )
-    _event: E | None = None
-    _target: S | None = None
-    _verbose: bool = False
 
-    def trigger(self, event: E, context: C) -> dict[str, S | E]:
+    def _state_transition(
+        self,
+        event: E | None,
+        context: C,
+    ) -> tuple[S, S | None]:
+        original_state = self._state
+        target_state = None
+
+        transitions = self._resolve_transitions(original_state, event=event)
+        while transitions:
+            source_state = self._state
+            target_state, action = self._evaluate_guards(
+                event=event, context=context, transitions=transitions
+            )
+
+            if target_state is None:
+                target_state = self._state
+                break
+
+            self._dispatch_event(machine_event=InternalEvent.TRANSITION_START)
+
+            self._execute_on_exit(context)
+            self._execute_transition_action(action, context)
+            self._apply_transition(target_state)
+            self._execute_on_entry(context)
+            self._execute_on_transition(source_state, target_state, context)
+
+            self._dispatch_event(
+                machine_event=InternalEvent.TRANSITION_COMPLETE,
+                source=source_state,
+                target=target_state,
+            )
+            event = None
+            transitions = self._resolve_transitions(target_state, event=event)
+
+        return (original_state, target_state)
+
+    def start(self, context: C) -> dict[str, S | E | None] | None:
+        if self._initialized:
+            return
+
+        self._initialized = True
+        self._dispatch_event(machine_event=InternalEvent.MACHINE_START)
+        self._execute_on_entry(context)
+
+        source_state, target_state = self._state_transition(event=None, context=context)
+        return dict(source=source_state, target=target_state, event=None)
+
+    def trigger(self, event: E, context: C) -> dict[str, S | E | None]:
+        if not self._initialized:
+            raise UninitializedError(machine_name=self._name)
+
         self._event = event
         self._dispatch_event(machine_event=InternalEvent.EVENT_TRIGGER)
 
-        source_state = self._state
-        transitions = self._resolve_transitions(event)
-        target_state, action = self._evaluate_guards(context, transitions)
-
-        self._dispatch_event(machine_event=InternalEvent.TRANSITION_START)
-
-        self._execute_on_exit(context)
-        self._execute_transition_action(action, context)
-        self._apply_transition(target_state)
-        self._execute_on_entry(context)
-        self._execute_on_transition(source_state, target_state, context)
-
-        self._dispatch_event(
-            machine_event=InternalEvent.TRANSITION_COMPLETE,
-            source=source_state,
-            target=target_state,
+        source_state, target_state = self._state_transition(
+            event=event, context=context
         )
+        self._event = None
         return dict(source=source_state, target=target_state, event=event)
 
     def _execute_guard(self, guard: Guard[C], context: C) -> bool | Awaitable[bool]:
@@ -216,9 +260,10 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
 
     def _evaluate_guards(
         self,
+        event: E | None,
         context: C,
         transitions: tuple[tuple[S, Action[C] | None, Guard[C] | None], ...],
-    ) -> tuple[S, Action[C] | None]:
+    ) -> tuple[S | None, Action[C] | None]:
 
         for target_state, action, guard in transitions:
             self._target = target_state
@@ -229,6 +274,10 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
 
             if self._execute_guard(guard, context):
                 return (target_state, action)
+
+        if event is None:
+            self._dispatch_event(machine_event=InternalEvent.TRANSITION_FAIL)
+            return (None, None)
 
         event_record = self._dispatch_event(
             machine_event=InternalEvent.EXCEPTION,
@@ -330,7 +379,7 @@ class AsyncStateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
         self._dispatch_event(machine_event=InternalEvent.EVENT_TRIGGER)
 
         source_state = self._state
-        transitions = self._resolve_transitions(event)
+        transitions = self._resolve_transitions(source_state, event)
         target_state, action = await self._evaluate_guards(context, transitions)
 
         self._dispatch_event(machine_event=InternalEvent.TRANSITION_START)
@@ -470,7 +519,7 @@ class AsyncStateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
 
 @dataclass(slots=True)
 class StateMachineBuilder[S: Enum, E: Enum, C]:
-    _events: set[E] = field(default_factory=set, init=False)
+    _events: set[E | None] = field(default_factory=set, init=False)
     _states: set[S] = field(default_factory=set, init=False)
     _transitions: TransitionMap[S, E, C] = field(default_factory=dict, init=False)
     _on_entry: EntryExitAction[S, C] = field(default_factory=dict, init=False)
@@ -491,7 +540,7 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
     def add_transition(
         self,
         source_state: S,
-        event: E,
+        event: E | None,
         target_state: S,
         action: Action[C] | None = None,
         guard: Guard[C] | None = None,
@@ -561,7 +610,7 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
         }
 
     def _validate_model(self, name, initial_state) -> None:
-        if not self._transitions:
+        if not self._transitions and initial_state not in self._on_exit:
             raise TransitionMapError(machine_name=name)
 
         if initial_state not in self._states:
@@ -581,7 +630,7 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
                 )
 
         for event in self._events:
-            if not isinstance(event, Enum):
+            if not isinstance(event, Enum) and event is not None:
                 raise TypeError(
                     f"Event '{event}' must be an Enum, not {type(event).__name__}."
                 )
