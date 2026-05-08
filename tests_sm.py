@@ -1,13 +1,10 @@
 import asyncio
 import time
-from dataclasses import dataclass, field
 from types import SimpleNamespace
+from enum import Enum
 
 from sm_core import (
     BlockedTransition,
-    Enum,
-    IntEnum,
-    InvalidState,
     InvalidTransition,
     StateMachine,
     StateMachineBuilder,
@@ -56,17 +53,26 @@ def test_initial_state():
 def test_dead_state_exit():
     result = []
 
+    def test_guard_fail(ctx):
+        return False
+
     def test_on_exit(ctx):
         result.append(True)
 
     sm = (
         StateMachineBuilder[State, Event, Context]()
-        .add_transition(State.OFFLINE, Event.CONNECT, State.OFFLINE)
+        # .add_transition(State.OFFLINE, Event.CONNECT, State.OFFLINE)
+        .add_transition(State.OFFLINE, None, State.ONLINE)
+        .add_transition(State.ONLINE, None, State.PENDING)
+        .add_transition(State.PENDING, None, State.PROCESSED, guard=test_guard_fail)
         .on_exit(State.OFFLINE, test_on_exit)
+        .on_entry(State.PROCESSED, test_on_exit)
         .build(initial_state=State.OFFLINE, verbose=True)
     )
 
-    sm.trigger(event=Event.CONNECT, context=Context())
+    a = sm.start(context=Context())
+    print(a)
+    # sm.trigger(event=Event.CONNECT, context=Context())
     assert result == [True], f"Expected True, got {result}"
 
 
@@ -80,7 +86,8 @@ def test_valid_transition():
         .build(initial_state=State.OFFLINE, verbose=True)
     )
 
-    sm.trigger(Event.CONNECT, sm)
+    sm.start(context=sm)
+    sm.trigger(Event.CONNECT, context=sm)
     assert sm._state == State.ONLINE, f"Expected ONLINE, got {sm._state}"
 
 
@@ -91,6 +98,7 @@ def test_invalid_transition_error():
         .build(initial_state=State.OFFLINE, verbose=True)
     )
     try:
+        sm.start(context=Context())
         sm.trigger(Event.DISCONNECT, Context())
     except InvalidTransition as e:
         return e
@@ -116,6 +124,7 @@ def test_transition_guards():
         .build(initial_state=State.OFFLINE, verbose=True)
     )
 
+    sm.start(context=sm)
     sm.trigger(Event.CONNECT, sm)
     assert sm._state == State.ONLINE, f"Expected ONLINE, got {sm._state}"
 
@@ -150,6 +159,7 @@ def test_entry_exit_actions():
         .build(initial_state=State.OFFLINE, verbose=True)
     )
 
+    sm.start(context=sm)
     sm.trigger(Event.CONNECT, sm)
     assert results == ["exited_offline", "entered_online", "on_transition"], (
         "Actions fired in wrong order"

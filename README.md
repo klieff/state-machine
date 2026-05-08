@@ -20,7 +20,8 @@
 ## Internal Event Handling
 
 On an Event Trigger:
-Evaluate Guard Predicates -> Execute On-Exit Actions -> Execute Transition Actions -> State Change -> Execute On-Entry Actions -> Execute On-Transition Actions
+Evaluate Guard Predicates -> Execute On-Exit Actions -> Execute Transition Actions ->
+State Change -> Execute On-Entry Actions -> Execute On-Transition Actions
 
 ## Builder methods
 
