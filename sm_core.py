@@ -111,6 +111,9 @@ class StateMachineMixin[S: Enum, E: Enum, C]:
     # def get_state_events(self, state: S) -> list[E]:
     #     return [event for (s, event) in self._transitions.keys() if s == state]
 
+    def get_transition_map(self) -> ProxyTransitionMap[S, E, C]:
+        return self._transitions
+
     def _apply_transition(self, target_state: S) -> None:
         source_state = self._state
         self._state = target_state
