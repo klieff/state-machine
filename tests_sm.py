@@ -110,10 +110,17 @@ def test_dead_state_exit():
         .add_transition(State.OFFLINE, None, State.ONLINE)
         .add_transition(State.ONLINE, None, State.PENDING)
         .add_transition(State.PENDING, None, State.PROCESSED, guard=test_guard_fail)
+        .add_transition(State.PENDING, None, State.OFFLINE, action=test_on_exit)
+        .add_transition(
+            State.PROCESSED, Event.RESTORE, State.RESTORING, action=test_on_exit
+        )
         .on_exit(State.OFFLINE, test_on_exit)
         .on_entry(State.PROCESSED, test_on_exit)
         .build(initial_state=State.OFFLINE, verbose=True)
     )
+
+    tm = sm.get_transition_map()
+    visualize_state_machine(tm)
 
     a = sm.start(context=Context())
     print(a)
@@ -203,9 +210,6 @@ def test_entry_exit_actions():
         .on_transition(State.OFFLINE, State.ONLINE, test_on_transition)
         .build(initial_state=State.OFFLINE, verbose=True)
     )
-
-    tm = sm.get_transition_map()
-    visualize_state_machine(tm)
 
     sm.start(context=sm)
     sm.trigger(Event.CONNECT, sm)
