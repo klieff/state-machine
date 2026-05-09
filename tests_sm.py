@@ -11,6 +11,7 @@ from sm_core import (
     StateMachineBuilder,
     TransitionMapError,
     ProxyTransitionMap,
+    TransitionMap,
     auto,
 )
 
@@ -38,32 +39,28 @@ class Context:
 
 
 def visualize_state_machine(
-    transition_map: ProxyTransitionMap, filename="state_diagram.dot"
+    transition_map: TransitionMap, filename="state_diagram.dot"
 ):
-    # dot = Digraph(format="png")
     dot = Digraph()
-    dot.attr(rankdir="LR", nodesep="0.5", ranksep="1.0")
-
-    # Configure default node styling
+    dot.attr(rankdir="TB", nodesep="0.5", ranksep="1.0")
     dot.attr(
         "node", shape="circle", fontname="Arial", style="filled", fillcolor="white"
     )
 
     for (start_state, event), transitions in transition_map.items():
-        # Handle Event or Automatic Transition label
         event_name = event.name if event else "auto"
 
-        for end_state, action, guard in transitions:
-            # Build a descriptive label: "Event [Guard] / Action"
+        for end_state, actions, guards in transitions:
             label_parts = [f"{event_name}"]
-            if guard:
-                label_parts.append(f"[{guard.__name__}]")
-            if action:
-                label_parts.append(f"/ {action.__name__}")
+            if guards:
+                for guard in guards:
+                    label_parts.append(f"\n[{guard.__name__}]")
+            if actions:
+                for action in actions:
+                    label_parts.append(f"\n{action.__name__}")
 
             edge_label = " ".join(label_parts)
 
-            # Use different styling for automatic transitions
             edge_style = "dashed" if event is None else "solid"
 
             dot.edge(
@@ -73,10 +70,7 @@ def visualize_state_machine(
                 style=edge_style,
                 fontsize="10",
             )
-
     dot.save(filename)
-    # with open(filename, "w") as f:
-    #     f.write(dot.source)
     # dot.render(filename, view=True)
 
 
@@ -99,15 +93,25 @@ def test_dead_state_exit():
     result = []
 
     def test_guard_fail(ctx):
-        return False
+        print("Hello from", test_guard_fail.__name__)
+        return True
 
     def test_on_exit(ctx):
+        print("Hello from", test_on_exit.__name__)
         result.append(True)
 
-    sm = (
+    def test_on_action1(ctx):
+        print("Hello from", test_on_action1.__name__)
+
+    def test_on_action2(ctx):
+        print("Hello from", test_on_action2.__name__)
+
+    sm_model = (
         StateMachineBuilder[State, Event, Context]()
         # .add_transition(State.OFFLINE, Event.CONNECT, State.OFFLINE)
-        .add_transition(State.OFFLINE, None, State.ONLINE)
+        .add_transition(
+            State.OFFLINE, None, State.ONLINE, action=(test_on_action1, test_on_action2)
+        )
         .add_transition(State.ONLINE, None, State.PENDING)
         .add_transition(State.PENDING, None, State.PROCESSED, guard=test_guard_fail)
         .add_transition(State.PENDING, None, State.OFFLINE, action=test_on_exit)
@@ -116,12 +120,12 @@ def test_dead_state_exit():
         )
         .on_exit(State.OFFLINE, test_on_exit)
         .on_entry(State.PROCESSED, test_on_exit)
-        .build(initial_state=State.OFFLINE, verbose=True)
     )
 
-    tm = sm.get_transition_map()
+    tm = sm_model.get_transition_map()
     visualize_state_machine(tm)
 
+    sm = sm_model.build(initial_state=State.OFFLINE, verbose=True)
     a = sm.start(context=Context())
     print(a)
     # sm.trigger(event=Event.CONNECT, context=Context())

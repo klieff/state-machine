@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum, auto
 from inspect import isawaitable
 from types import MappingProxyType
-from typing import ClassVar
+from typing import ClassVar, Collection
 
 from exceptions import (
     ActionError,
@@ -25,12 +25,13 @@ type Guard[C] = Callable[[C], Awaitable[bool] | bool]
 type EntryExitAction[S, C] = dict[S, list[Action[C]]]
 type TransitionAction[S, C] = dict[tuple[S, S], list[Action[C]]]
 type TransitionMap[S, E, C] = dict[
-    tuple[S, E | None], list[tuple[S, Action[C] | None, Guard[C] | None]]
+    tuple[S, E | None], list[tuple[S, tuple[Action[C]], tuple[Guard[C]]]]
 ]
 type ProxyEntryExitAction[S, C] = MappingProxyType[S, tuple[Action[C], ...]]
 type ProxyTransitionAction[S, C] = MappingProxyType[tuple[S, S], tuple[Action[C], ...]]
 type ProxyTransitionMap[S, E, C] = MappingProxyType[
-    tuple[S, E | None], tuple[tuple[S, Action[C] | None, Guard[C] | None], ...]
+    tuple[S, E | None],
+    tuple[tuple[S, tuple[Action[C]], tuple[Guard[C]]], ...],
 ]
 
 
@@ -111,9 +112,6 @@ class StateMachineMixin[S: Enum, E: Enum, C]:
     # def get_state_events(self, state: S) -> list[E]:
     #     return [event for (s, event) in self._transitions.keys() if s == state]
 
-    def get_transition_map(self) -> ProxyTransitionMap[S, E, C]:
-        return self._transitions
-
     def _apply_transition(self, target_state: S) -> None:
         source_state = self._state
         self._state = target_state
@@ -155,7 +153,7 @@ class StateMachineMixin[S: Enum, E: Enum, C]:
 
     def _resolve_transitions(
         self, source: S, event: E | None
-    ) -> tuple[tuple[S, Action[C] | None, Guard[C] | None], ...] | None:
+    ) -> tuple[tuple[S, tuple[Action[C]] | None, tuple[Guard[C]] | None], ...] | None:
         transitions = self._transitions.get((source, event))
         if not transitions and event is not None:
             self._dispatch_event(
@@ -195,7 +193,7 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
         transitions = self._resolve_transitions(original_state, event=event)
         while transitions:
             source_state = self._state
-            target_state, action = self._evaluate_guards(
+            target_state, actions = self._evaluate_guards(
                 event=event, context=context, transitions=transitions
             )
 
@@ -206,7 +204,7 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
             self._dispatch_event(machine_event=InternalEvent.TRANSITION_START)
 
             self._execute_on_exit(context)
-            self._execute_transition_action(action, context)
+            self._execute_transition_action(actions, context)
             self._apply_transition(target_state)
             self._execute_on_entry(context)
             self._execute_on_transition(source_state, target_state, context)
@@ -245,13 +243,10 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
         self._event = None
         return dict(source=source_state, target=target_state, event=event)
 
+    # FIX: An awaitable guard should NEVER be passed to this function
     def _execute_guard(self, guard: Guard[C], context: C) -> bool | Awaitable[bool]:
         try:
             passed = guard(context)
-            self._dispatch_event(
-                machine_event=InternalEvent.GUARD_EVALUATE, guard=guard, passed=passed
-            )
-            return passed
         except Exception as e:
             event_record = self._dispatch_event(
                 machine_event=InternalEvent.EXCEPTION,
@@ -260,23 +255,40 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
                 error_message=f"<{type(e).__name__}>: {e}",
             )
             raise GuardError(event_record=asdict(event_record)) from e
+        else:
+            self._dispatch_event(
+                machine_event=InternalEvent.GUARD_EVALUATE, guard=guard, passed=passed
+            )
+            return passed
+
+    def _execute_guards(
+        self, guards: tuple[Guard[C]], context: C
+    ) -> bool | Awaitable[bool]:
+        passed = True
+        for guard in guards:
+            if passed := self._execute_guard(guard, context):
+                break
+        return passed
 
     def _evaluate_guards(
         self,
         event: E | None,
         context: C,
-        transitions: tuple[tuple[S, Action[C] | None, Guard[C] | None], ...],
-    ) -> tuple[S | None, Action[C] | None]:
+        transitions: tuple[
+            tuple[S, tuple[Action[C]] | None, tuple[Guard[C]] | None], ...
+        ],
+    ) -> tuple[S | None, tuple[Action[C]] | None]:
 
-        for target_state, action, guard in transitions:
+        for target_state, actions, guards in transitions:
             self._target = target_state
-            if guard is None:
+            if not guards:
+                # FIX: Double check the logic
                 if len(transitions) > 1:
                     self._dispatch_event(machine_event=InternalEvent.GUARD_SKIP)
-                return (target_state, action)
+                return (target_state, actions)
 
-            if self._execute_guard(guard, context):
-                return (target_state, action)
+            if self._execute_guards(guards, context):
+                return (target_state, actions)
 
         if event is None:
             self._dispatch_event(machine_event=InternalEvent.TRANSITION_FAIL)
@@ -311,11 +323,13 @@ class StateMachine[S: Enum, E: Enum, C](StateMachineMixin[S, E, C]):
             action_type=InternalEvent.ON_TRANSITION,
         )
 
-    def _execute_transition_action(self, action: Action[C] | None, context: C) -> None:
-        if action:
-            self._run_action(
+    def _execute_transition_action(
+        self, actions: tuple[Action[C]] | None, context: C
+    ) -> None:
+        if actions:
+            self._run_actions(
                 context=context,
-                action=action,
+                actions=actions,
                 action_type=InternalEvent.TRANSITION_ACTION,
             )
 
@@ -535,6 +549,16 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
     def _get_name(cls, base_name: str = "SM"):
         return f"{base_name}_{next(cls._counter)}"
 
+    def _ensure_tuple(self, obj) -> tuple:
+        if callable(obj):
+            return (obj,)
+        elif isinstance(obj, (list, set, tuple)):
+            return tuple(obj)
+        return ()
+
+    def get_transition_map(self) -> TransitionMap[S, E, C]:
+        return self._transitions
+
     def add_audit_sink(self, audit_sink: Callable) -> "StateMachineBuilder[S, E, C]":
         if callable(audit_sink):
             self._audit_sink = audit_sink
@@ -545,14 +569,14 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
         source_state: S,
         event: E | None,
         target_state: S,
-        action: Action[C] | None = None,
-        guard: Guard[C] | None = None,
+        action: Collection[Action[C]] | Action[C] | None = None,
+        guard: Collection[Guard[C]] | Guard[C] | None = None,
     ) -> "StateMachineBuilder[S, E, C]":
         self._events.add(event)
         self._states.add(source_state)
         self._states.add(target_state)
         self._transitions.setdefault((source_state, event), []).append(
-            (target_state, action, guard)
+            (target_state, self._ensure_tuple(action), self._ensure_tuple(guard))
         )
         return self
 
@@ -581,10 +605,10 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
 
         self._states.add(initial_state)
         self._validate_model(name, initial_state)
-        sm_params = self._prepare_immutables()
+        sm_config = self._prepare_immutables()
 
         return StateMachine(
-            _name=name, _state=initial_state, _verbose=verbose, **sm_params
+            _name=name, _state=initial_state, _verbose=verbose, **sm_config
         )
 
     def build_async(
@@ -594,10 +618,10 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
 
         self._states.add(initial_state)
         self._validate_model(name, initial_state)
-        sm_params = self._prepare_immutables()
+        sm_config = self._prepare_immutables()
 
         return AsyncStateMachine(
-            _name=name, _state=initial_state, _verbose=verbose, **sm_params
+            _name=name, _state=initial_state, _verbose=verbose, **sm_config
         )
 
     def _prepare_immutables(self) -> dict:
