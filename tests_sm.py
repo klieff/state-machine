@@ -2,6 +2,7 @@ import asyncio
 import time
 from types import SimpleNamespace
 from enum import Enum
+from graphviz import Digraph
 
 from sm_core import (
     BlockedTransition,
@@ -9,6 +10,7 @@ from sm_core import (
     StateMachine,
     StateMachineBuilder,
     TransitionMapError,
+    ProxyTransitionMap,
     auto,
 )
 
@@ -33,6 +35,49 @@ class Event(Enum):
 
 class Context:
     id: int
+
+
+def visualize_state_machine(
+    transition_map: ProxyTransitionMap, filename="state_diagram.dot"
+):
+    # dot = Digraph(format="png")
+    dot = Digraph()
+    dot.attr(rankdir="LR", nodesep="0.5", ranksep="1.0")
+
+    # Configure default node styling
+    dot.attr(
+        "node", shape="circle", fontname="Arial", style="filled", fillcolor="white"
+    )
+
+    for (start_state, event), transitions in transition_map.items():
+        # Handle Event or Automatic Transition label
+        event_name = event.name if event else "auto"
+
+        for end_state, action, guard in transitions:
+            # Build a descriptive label: "Event [Guard] / Action"
+            label_parts = [f"{event_name}"]
+            if guard:
+                label_parts.append(f"[{guard.__name__}]")
+            if action:
+                label_parts.append(f"/ {action.__name__}")
+
+            edge_label = " ".join(label_parts)
+
+            # Use different styling for automatic transitions
+            edge_style = "dashed" if event is None else "solid"
+
+            dot.edge(
+                str(start_state.name),
+                str(end_state.name),
+                label=edge_label,
+                style=edge_style,
+                fontsize="10",
+            )
+
+    dot.save(filename)
+    # with open(filename, "w") as f:
+    #     f.write(dot.source)
+    # dot.render(filename, view=True)
 
 
 def test_initial_state():
@@ -158,6 +203,9 @@ def test_entry_exit_actions():
         .on_transition(State.OFFLINE, State.ONLINE, test_on_transition)
         .build(initial_state=State.OFFLINE, verbose=True)
     )
+
+    tm = sm.get_transition_map()
+    visualize_state_machine(tm)
 
     sm.start(context=sm)
     sm.trigger(Event.CONNECT, sm)

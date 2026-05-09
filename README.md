@@ -17,17 +17,21 @@
   * Internal transitions: not leaving the state
   * External self-transitions: exits and re-enters state
 
-## Internal Event Handling
+## Internal Event handling
 
 On an Event Trigger:
 Evaluate Guard Predicates -> Execute On-Exit Actions -> Execute Transition Actions ->
-State Change -> Execute On-Entry Actions -> Execute On-Transition Actions
+State Change -> Execute On-Entry Actions -> Execute On-Transition Actions ->
+Execute Automatic Transitions
 
 ## Builder methods
 
-* `.add_transition`: defines topology
-* `.on_transition`: defines global transition observers
-* `.on_exit` and `.on_entry`: define lifecycle callbacks
+* `.add_audit_sink(audit_callable)`: attach a user-defined audit listener
+* `.add_transition(...)`: defines transition topology
+  * Event-driven transitions: `.add_transition(source, event, target, action, guard)`
+  * Automatic transitions: `.add_transition(source, None, target, action, guard)`
+* `.on_transition(source, target, action)`: defines global transition observers
+* `.on_exit(source, action)` and `.on_entry(source, action)`: define lifecycle callbacks
 
 Other interesting on_methods:
 
@@ -39,3 +43,8 @@ Other interesting on_methods:
 * `.on_error(..)`
 * `.on_enter_any(..)`
 * `.on_final_state(..)`
+
+## State machine methods
+
+* `.start(context)`: initializes the State Machine (must be called to start the machine)
+* `.trigger(event, context)`: trigger an event
