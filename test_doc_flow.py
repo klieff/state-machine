@@ -72,16 +72,23 @@ def visualize_state_machine(
     transition_map: TransitionMap, filename="state_diagram.dot"
 ):
     dot = Digraph()
-    dot.attr(rankdir="TB", nodesep="0.5", ranksep="1.0")
+    dot.attr(rankdir="TB", nodesep="0.25", ranksep="2.0")
     dot.attr(
-        "node", shape="circle", fontname="Arial", style="filled", fillcolor="white"
+        "node",
+        width="1.4",
+        shape="circle",
+        fontname="Sans",
+        style="filled",
+        fillcolor="azure",
+        fixedsize="true",
     )
+    dot.attr("edge", fontname="Sans", fillcolor="aquamarine", fontcolor="black")
 
     for (start_state, event), transitions in transition_map.items():
         event_name = event.name if event else "auto"
 
         for end_state, actions, guards in transitions:
-            label_parts = [f"{event_name}"]
+            label_parts = [f" <{event_name}> "]
             if guards:
                 for guard in guards:
                     label_parts.append(f"\n[{guard.__name__}]")
@@ -90,7 +97,6 @@ def visualize_state_machine(
                     label_parts.append(f"\n{action.__name__}")
 
             edge_label = " ".join(label_parts)
-
             edge_style = "dashed" if event is None else "solid"
 
             dot.edge(
@@ -100,6 +106,7 @@ def visualize_state_machine(
                 style=edge_style,
                 fontsize="10",
             )
+    dot.node("DRAFT", fillcolor="green")
     dot.save(filename)
     # dot.render(filename, view=True)
 
@@ -326,8 +333,8 @@ sm_model = (
     .add_transition(State.ARCHIVED, Event.APPROVE, State.ARCHIVED)
 )
 
-# tm = sm_model.get_transition_map()
-# visualize_state_machine(tm)
+tm = sm_model.get_transition_map()
+visualize_state_machine(tm)
 
 
 # Self-transtions with guards + action: first matching guard win, or do all evaluate?
