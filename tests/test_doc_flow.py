@@ -334,8 +334,8 @@ sm_model = (
     .add_transition(State.ARCHIVED, Event.APPROVE, State.ARCHIVED)
 )
 
-tm = sm_model.get_transition_map()
-visualize_state_machine(tm)
+# tm = sm_model.get_transition_map()
+# visualize_state_machine(tm)
 
 
 # Self-transtions with guards + action: first matching guard win, or do all evaluate?
@@ -348,7 +348,7 @@ def test_self_transitions():
 
 
 test_self_transitions()
-exit()
+# exit()
 
 
 #  Guard priority/ordering: which fires first?
