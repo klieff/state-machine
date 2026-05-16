@@ -1,4 +1,4 @@
-# Atomic State Machine
+# Atomic State Machine (⚠️ work in progress)
 
 * Supports various `actions` and `guards` that can run before, during, or after a
   state transition
