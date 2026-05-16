@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 
 project.md
+todo.md
 *.dot
 *.log
 *.swp

@@ -107,7 +107,8 @@ def visualize_state_machine(
                 fontsize="10",
             )
     dot.node("DRAFT", fillcolor="green")
-    dot.save(filename)
+    # dot.save(filename)
+    dot.render("doc_flow", format="svg", cleanup=True)
     # dot.render(filename, view=True)
 
 
