@@ -56,6 +56,19 @@ class ReserveredEvent(Enum):
     ERROR = auto()
 
 
+@dataclass(frozen=True)
+class StateMachineConfig[S: Enum, E: Enum, C]:
+    name: str
+    initial_state: S
+    events: set[E | None]
+    states: set[S]
+    on_entry: EntryExitAction[S, C]
+    on_exit: EntryExitAction[S, C]
+    on_transition: TransitionAction[S, C]
+    transitions: TransitionMap[S, E, C]
+    verbose: bool
+
+
 @dataclass(slots=True)
 class EventDetails[S: Enum, E: Enum, C]:
     source: S | None = None
