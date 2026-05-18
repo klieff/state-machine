@@ -1,5 +1,6 @@
-# Atomic State Machine (⚠️ work in progress)
+# Event-Driven State Machine (⚠️ work in progress)
 
+* Transient state support
 * Supports various `actions` and `guards` that can run before, during, or after a
   state transition
   * `Transition` actions run during a state change and connects State 1 and State 2
