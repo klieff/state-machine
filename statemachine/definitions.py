@@ -1,6 +1,6 @@
-from datetime import datetime
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from collections.abc import Callable, Awaitable
+from datetime import datetime
 from enum import Enum, auto
 
 type Action[C] = Callable[[C], Awaitable[None] | None]
@@ -38,6 +38,7 @@ class StateMachineConfig[S: Enum, E: Enum, C]:
     on_exit: EntryExitAction[S, C]
     on_transition: TransitionAction[S, C]
     transitions: TransitionMap[S, E, C]
+    is_async: bool
     verbose: bool
 
 
