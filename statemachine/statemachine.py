@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import itertools
 from collections import deque
 from collections.abc import Awaitable, Callable
 from enum import Enum
-from typing import TYPE_CHECKING, ClassVar, Collection
+from typing import TYPE_CHECKING, ClassVar, Collection, Literal, overload
 
 from .definitions import EngineEvent, EventDetails, EventRecord, StateMachineConfig
-from .engine import SyncEngine  # , AsyncEngine
+from .engine import AsyncEngine, SyncEngine
 from .exceptions import UninitializedError
 from .utils import ensure_tuple, format_event_log, get_obj_name, validate_config
 
@@ -81,7 +82,7 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
 
     def build(
         self, initial_state: S, name: str | None = None, verbose: bool = False
-    ) -> StateMachine[S, E, C]:
+    ) -> StateMachine[S, E, C, Literal[False]]:
         self._states.add(initial_state)
 
         config = StateMachineConfig[S, E, C](
@@ -93,15 +94,16 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
             on_entry=self._on_entry,
             on_exit=self._on_exit,
             on_transition=self._on_transition,
-            is_async=False,
             verbose=verbose,
         )
         validate_config(config)
-        return StateMachine[S, E, C](config=config, audit_sink=self._audit_sink)
+        return StateMachine[S, E, C, False](
+            config=config, audit_sink=self._audit_sink, is_async=False
+        )
 
     def build_async(
         self, initial_state: S, name: str | None = None, verbose: bool = False
-    ) -> StateMachine[S, E, C]:
+    ) -> StateMachine[S, E, C, Literal[True]]:
         self._states.add(initial_state)
 
         config = StateMachineConfig[S, E, C](
@@ -113,43 +115,82 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
             on_entry=self._on_entry,
             on_exit=self._on_exit,
             on_transition=self._on_transition,
-            is_async=True,
             verbose=verbose,
         )
         validate_config(config)
-        return StateMachine[S, E, C](config=config, audit_sink=self._audit_sink)
+        return StateMachine[S, E, C, True](
+            config=config, audit_sink=self._audit_sink, is_async=True
+        )
 
 
 # TODO : Also think about threadsafety in both sync & async engines:
 #        For threaded cases use thread locks and for async use an async queue
-class StateMachine[S: Enum, E: Enum, C]:
+class StateMachine[S: Enum, E: Enum, C, bool]:
     def __init__(
         self,
         config: StateMachineConfig,
         audit_sink: Callable | None = None,
+        is_async: bool = False,
     ) -> None:
-        # engine = AsyncEngine if config.is_async else SyncEngine
-        engine = SyncEngine
+        engine = AsyncEngine if is_async else SyncEngine
         self._state = config.initial_state
         self._event = None
         self._target = None
         self._config = config
         self._engine = engine(sm=self, transition_depth=10)
-        self._audit_sink = audit_sink
         self._event_log = deque(maxlen=MAX_EVENT_LOG)
+        self._audit_sink = audit_sink
         self._initialized = False
+        self._is_async = is_async
 
-    def start(self, context: C) -> dict[str, S | E | None] | None:
+        # try:
+        #     loop = asyncio.get_event_loop()
+        # except Exception:
+        #     loop = asyncio.new_event_loop()
+
+        self._loop = None  # loop
+        self._queue = asyncio.Queue(maxsize=10)  # if loop else None
+        # if self._loop is not None:
+        #     self._loop.create_task(self._queue_consumer())
+
+    @overload
+    def start(self: StateMachine[S, E, C, Literal[True]], context: C) -> Awaitable: ...
+
+    @overload
+    def start(self: StateMachine[S, E, C, Literal[False]], context: C) -> None: ...
+
+    def start(self, context: C) -> Awaitable | None:
         if self._initialized:
             return
 
         self._initialized = True
         self._dispatch_event(machine_event=EngineEvent.MACHINE_START)
 
-        return self._engine.start_engine(state=self._state, context=context)
+        result = self._engine.start_engine(state=self._state, context=context)
+        if self._is_async:  # and self._loop is not None and self._queue is not None:
+            if self._loop is None:
+                try:
+                    self._loop = asyncio.get_running_loop()
+                except Exception:
+                    print("BIGLY ERROR!")
+                    raise RuntimeError
+                self._loop.create_task(self._queue_consumer())
+            future = self._loop.create_future()
+            enqueue = self._queue.put((result, future))
+            return asyncio.gather(enqueue, future)
 
     def stop(self):
         self._engine.stop_engine()
+
+    @overload
+    def trigger(
+        self: StateMachine[S, E, C, Literal[True]], event: E, context: C
+    ) -> Awaitable: ...
+
+    @overload
+    def trigger(
+        self: StateMachine[S, E, C, Literal[False]], event: E, context: C
+    ) -> None: ...
 
     def trigger(self, event: E, context: C) -> Awaitable | None:
         if not self._initialized:
@@ -159,9 +200,14 @@ class StateMachine[S: Enum, E: Enum, C]:
         self._dispatch_event(machine_event=EngineEvent.EVENT_TRIGGER)
         self._event = None
 
-        return self._engine.evaluate_transitions(
+        result = self._engine.evaluate_transitions(
             source=self._state, event=event, context=context
         )
+        if self._is_async and self._loop is not None and self._queue is not None:
+            future = self._loop.create_future()
+            enqueue = self._queue.put((result, future))
+            return asyncio.gather(enqueue, future)
+            # return self._queue.put((result, future))
 
     def _apply_transition(self, target: S) -> None:
         source = self._state
@@ -195,3 +241,21 @@ class StateMachine[S: Enum, E: Enum, C]:
 
         self._event_log.append(record)
         return record
+
+    async def _queue_consumer(self):
+        while True and self._queue is not None:
+            coroutine, future = await self._queue.get()
+            try:
+                result = await coroutine
+                future.set_result(result)
+            except Exception as e:
+                future.set_exception(e)
+            finally:
+                self._queue.task_done()
+
+    async def send_event_async(self, event):
+        if self._loop is None or self._queue is None:
+            return
+        future = self._loop.create_future()
+        await self._queue.put((event, future))
+        return await future

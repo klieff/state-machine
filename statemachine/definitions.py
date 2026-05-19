@@ -38,7 +38,6 @@ class StateMachineConfig[S: Enum, E: Enum, C]:
     on_exit: EntryExitAction[S, C]
     on_transition: TransitionAction[S, C]
     transitions: TransitionMap[S, E, C]
-    is_async: bool
     verbose: bool
 
 
