@@ -134,13 +134,11 @@ class StateMachine[S: Enum, E: Enum, C]:  # , bool]:
         audit_sink: Callable | None = None,
         is_async: bool = False,
     ) -> None:
-        # engine = AsyncEngine if is_async else SyncEngine
-        engine = AsyncEngine
         self._state = config.initial_state
         self._event = None
         self._target = None
         self._config = config
-        self._engine = engine(sm=self, transition_depth=10)
+        self._engine = AsyncEngine(sm=self, transition_depth=10)
         self._event_log = deque(maxlen=MAX_EVENT_LOG)
         self._audit_sink = audit_sink
         self._initialized = False
@@ -153,24 +151,13 @@ class StateMachine[S: Enum, E: Enum, C]:  # , bool]:
         self._initialized = True
         self._dispatch_event(machine_event=EngineEvent.MACHINE_START)
 
-        if self._is_async:
-            result = self._engine.start_engine_async(
-                state=self._state, context=context, is_async=self._is_async
-            )
-        else:
-            result = self._engine.start_engine(
-                state=self._state, context=context, is_async=self._is_async
-            )
+        return self._engine.start_engine(
+            state=self._config.initial_state, context=context, is_async=self._is_async
+        )
 
-        return result
-
-    def stop(self):
-        if self._is_async:
-            result = self._engine.stop_engine_async()
-        else:
-            result = self._engine.stop_engine()
-
-        return result
+    def stop(self, force: bool = False):
+        self._initialized = False
+        return self._engine.stop_engine(is_async=self._is_async, force=force)
 
     def trigger(self, event: E, context: C) -> Awaitable | None:
         if not self._initialized:
@@ -180,22 +167,9 @@ class StateMachine[S: Enum, E: Enum, C]:  # , bool]:
         self._dispatch_event(machine_event=EngineEvent.EVENT_TRIGGER)
         self._event = None
 
-        if self._is_async:
-            result = self._engine.event_trigger_async(
-                # source=self._state,
-                event=event,
-                context=context,
-                is_async=self._is_async,
-            )
-        else:
-            result = self._engine.event_trigger(
-                # source=self._state,
-                event=event,
-                context=context,
-                is_async=self._is_async,
-            )
-
-        return result
+        return self._engine.event_trigger(
+            event=event, context=context, is_async=self._is_async
+        )
 
     def _apply_transition(self, target: S) -> None:
         source = self._state

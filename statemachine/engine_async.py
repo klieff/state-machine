@@ -22,17 +22,17 @@ if TYPE_CHECKING:
     from .statemachine import StateMachine
 
 
-@dataclass
-class TriggerRequest:
+@dataclass(slots=True)
+class TaskRequest:
     task: Coroutine
-    result: asyncio.Future[None]
+    future: asyncio.Future[None]
 
 
 class EngineRuntime:
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
-            name="EngineRuntime",
+            name="SMEngineRuntime",
             target=self._run_loop,
             daemon=True,
         )
@@ -63,38 +63,43 @@ class EngineRuntime:
         self._thread.join()
 
 
-class BaseEngine[S: Enum, E: Enum, C]:
+class BaseEngine[S: Enum, E: Enum]:
     _runtime: EngineRuntime = EngineRuntime()
+    _running_instances: int = 0
 
     def __init__(self, sm: StateMachine, transition_depth: int = 10):
         self.sm = sm
         self._state = sm._config.initial_state
         self._transition_depth = transition_depth
 
-    def _start_engine(self) -> None:
+    async def _setup_on_runtime_loop(self) -> None:
+        self._queue: asyncio.Queue[TaskRequest | Literal["STOP"]] = asyncio.Queue()
+        self._worker_task = asyncio.create_task(self._worker())
+
+    async def _queue_task(self, task: Coroutine) -> None:
+        self._assert_runtime_thread()
+
+        future = self._runtime.loop.create_future()
+        await self._queue.put(TaskRequest(task=task, future=future))
+        await future
+
+    def _start_worker(self) -> None:
         if not self._runtime.is_running():
             self._runtime.start()
 
-        setup_future = self._runtime.submit(self._setup_on_runtime_loop())
-        setup_future.result()
+        self._runtime.submit(self._setup_on_runtime_loop()).result()
+        BaseEngine._running_instances += 1
 
-    async def _setup_on_runtime_loop(self) -> None:
-        # TODO : Can be moved to __init__
-        self._queue: asyncio.Queue[TriggerRequest | Literal["STOP"]] = asyncio.Queue(
-            maxsize=10
-        )
-        self._worker_task = asyncio.create_task(self._worker())
-
-    async def _get_state_impl(self) -> S:
-        self._assert_runtime_thread()
-        return self._state
-
-    async def _enqueue_task(self, task: Coroutine) -> None:
+    async def _stop_worker(self) -> None:
         self._assert_runtime_thread()
 
-        result = self._runtime.loop.create_future()
-        await self._queue.put(TriggerRequest(task=task, result=result))
-        await result
+        if self._worker_task.done():
+            return
+
+        await self._queue.put("STOP")
+        await self._queue.join()
+        await self._worker_task
+        BaseEngine._running_instances -= 1
 
     async def _worker(self) -> None:
         while True:
@@ -106,21 +111,15 @@ class BaseEngine[S: Enum, E: Enum, C]:
 
             try:
                 await request.task
-                request.result.set_result(None)
+                request.future.set_result(None)
             except Exception as e:
-                request.result.set_exception(e)
+                request.future.set_exception(e)
             finally:
                 self._queue.task_done()
 
-    async def _close_impl(self) -> None:
+    async def _get_state_impl(self) -> S:
         self._assert_runtime_thread()
-
-        if self._worker_task.done():
-            return
-
-        await self._queue.put("STOP")
-        await self._queue.join()
-        await self._worker_task
+        return self._state
 
     def _assert_runtime_thread(self) -> None:
         if threading.current_thread() is not self._runtime._thread:
@@ -128,63 +127,41 @@ class BaseEngine[S: Enum, E: Enum, C]:
                 "State machine internals must run on the runtime thread."
             )
 
-    def resolve_transitions(
-        self, state: S, event: E | None
-    ) -> list[tuple[S, tuple[Action[C]] | None, tuple[Guard[C]] | None]] | None:
-        transitions = self.sm._config.transitions.get((state, event))
-        if not transitions and event is not None:
-            self.sm._dispatch_event(
-                machine_event=EngineEvent.EXCEPTION,
-                error_type=InvalidTransition,
-                error_message=f"No transition map registered for {event}",
-            )
-            self._runtime.submit(self._close_impl())
-            # self.stop_engine()
-            raise InvalidTransition(event_record=asdict(self.sm._event_log[-1]))
-
-        return transitions
-
 
 class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
-    def stop_engine(self) -> None:
-        self._runtime.submit(self._close_impl())
+    # TODO : Move error handling and event dispatching to this class?
+    #        Hmm...a proper error handler is probably much cleaner.
+    def start_engine(self, state: S, context: C, is_async: bool) -> Awaitable | None:
+        self._start_worker()
 
-    async def stop_engine_async(self) -> None:
-        await self._runtime.submit_async(self._close_impl())
-
-    def force_stop_engine(self) -> None:
-        self._runtime.stop()
-        raise RuntimeError("Engine forcefully halted.")
-
-    def start_engine(self, state: S, context: C, is_async: bool) -> None:
-        self._start_engine()
         coro = self.evaluate_initial_state(state=state, context=context)
 
-        # if is_async:
-        #     await self._runtime.submit_async(self._enqueue_task(coro))
-        # else:
-        #     self._runtime.submit(self._enqueue_task(coro)).result()
-        self._runtime.submit(self._enqueue_task(coro)).result()
+        if is_async:
+            return self._runtime.submit_async(self._queue_task(coro))
+        else:
+            return self._runtime.submit(self._queue_task(coro)).result()
 
-    async def start_engine_async(self, state: S, context: C, is_async: bool) -> None:
-        self._start_engine()
-        coro = self.evaluate_initial_state(state=state, context=context)
+    def stop_engine(self, is_async: bool, force: bool = False) -> Awaitable | None:
+        if force:
+            self._runtime.stop()
+            raise RuntimeError("Engine forcefully halted.")
 
-        # if is_async:
-        #     await self._runtime.submit_async(self._enqueue_task(coro))
-        # else:
-        #     self._runtime.submit(self._enqueue_task(coro)).result()
-        await self._runtime.submit_async(self._enqueue_task(coro))
+        if is_async:
+            return self._runtime.submit_async(self._stop_worker())
+        else:
+            return self._runtime.submit(self._stop_worker()).result()
 
-    def event_trigger(self, event: E, context: C, is_async: bool) -> None:
+    def event_trigger(self, event: E, context: C, is_async: bool) -> Awaitable | None:
         coro = self.evaluate_transitions(event=event, context=context)
 
-        self._runtime.submit(self._enqueue_task(coro)).result()
-
-    async def event_trigger_async(self, event: E, context: C, is_async: bool) -> None:
-        coro = self.evaluate_transitions(event=event, context=context)
-
-        await self._runtime.submit_async(self._enqueue_task(coro))
+        if is_async:
+            return self._runtime.submit_async(self._queue_task(coro))
+        else:
+            try:
+                return self._runtime.submit(self._queue_task(coro)).result()
+            except Exception as e:
+                self._runtime.submit(self._stop_worker()).result()
+                raise e
 
     async def evaluate_initial_state(self, state: S, context: C) -> None:
         await self.evaluate_on_entry(state=state, context=context)
@@ -192,7 +169,7 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
 
     async def evaluate_transitions(self, event: E | None, context: C) -> None:
         source_state = self._state
-        transitions = self.resolve_transitions(state=source_state, event=event)
+        transitions = await self.resolve_transitions(state=source_state, event=event)
 
         # TODO : a source state has multiple automatic transitions decide
         #        on how to evaluate them - maybe based on priority
@@ -229,7 +206,9 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
             )
             event = None
             source_state = target_state
-            transitions = self.resolve_transitions(state=source_state, event=event)
+            transitions = await self.resolve_transitions(
+                state=source_state, event=event
+            )
             transition_depth += 1
 
     async def evaluate_guards(
@@ -290,7 +269,6 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
                     error_type=GuardError,
                     error_message=f"<{type(e).__name__}>: {e}",
                 )
-                await self.stop_engine_async()
                 raise GuardError(event_record=asdict(event_record)) from e
 
             self.sm._dispatch_event(
@@ -331,8 +309,21 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
                     error_type=ActionError,
                     error_message=f"<{type(e).__name__}>: {e}",
                 )
-                await self.stop_engine_async()
                 raise ActionError(event_record=asdict(event_record)) from e
+
+    async def resolve_transitions(
+        self, state: S, event: E | None
+    ) -> list[tuple[S, tuple[Action[C]] | None, tuple[Guard[C]] | None]] | None:
+        transitions = self.sm._config.transitions.get((state, event))
+        if not transitions and event is not None:
+            self.sm._dispatch_event(
+                machine_event=EngineEvent.EXCEPTION,
+                error_type=InvalidTransition,
+                error_message=f"No transition map registered for {event}",
+            )
+            raise InvalidTransition(event_record=asdict(self.sm._event_log[-1]))
+
+        return transitions
 
     # async def execute_validators(self) -> None:
     #     event_record = self.sm._dispatch_event(

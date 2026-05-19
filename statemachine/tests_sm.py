@@ -228,7 +228,6 @@ def test_empty_map_error():
 
     try:
         sm.build(initial_state=State.OFFLINE, verbose=True)
-        sm.stop()
     except TransitionMapError as e:
         return e
     except Exception as e:
@@ -295,12 +294,12 @@ def test_async_exit_entry_actions():
         await asyncio.gather(
             sm.start(context=ctx),
             sm.trigger(Event.CONNECT, ctx),
+            sm.stop(),
             sm2.start(context=ctx2),
             sm2.trigger(Event.CONNECT, ctx2),
+            sm2.stop(),
             sm3.start(context=ctx3),
             sm3.trigger(Event.CONNECT, ctx3),
-            sm.stop(),
-            sm2.stop(),
             sm3.stop(),
             return_exceptions=True,
         )
