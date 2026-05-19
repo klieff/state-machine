@@ -338,6 +338,8 @@ def test_self_transitions():
     sm = sm_model.build(initial_state=State.DRAFT, verbose=True)
     sm.start(context=ctx)
     sm.trigger(event=Event.SUBMIT, context=ctx)
+    sm.stop()
+    print("test_self_transitions completed!")
 
 
 test_self_transitions()
@@ -406,6 +408,8 @@ def test_unconditional_transiton():
     sm = sm_model.build(initial_state=State.DRAFT, verbose=True)
     sm.start(context=ctx)
     sm.trigger(event=Event.RESET, context=ctx)
+    sm.stop()
+    print("test_unconditional_transiton completed!")
 
 
 test_unconditional_transiton()

@@ -124,6 +124,7 @@ def test_dead_state_exit():
 
     sm = sm_model.build(initial_state=State.OFFLINE, verbose=True)
     sm.start(context=Context())
+    sm.stop()
     # sm.trigger(event=Event.CONNECT, context=Context())
     assert result == [True, True], f"Expected True, got {result}"
 
@@ -140,6 +141,7 @@ def test_valid_transition():
 
     sm.start(context=sm)
     sm.trigger(Event.CONNECT, context=sm)
+    sm.stop()
     assert sm._state == State.ONLINE, f"Expected ONLINE, got {sm._state}"
 
 
@@ -152,6 +154,7 @@ def test_invalid_transition_error():
     try:
         sm.start(context=Context())
         sm.trigger(Event.DISCONNECT, Context())
+        sm.stop()
     except InvalidTransition as e:
         return e
     except Exception as e:
@@ -182,6 +185,7 @@ def test_transition_guards():
 
     try:
         sm.trigger(Event.FETCH, sm)
+        sm.stop()
     except BlockedTransition as e:
         return e
     except Exception as e:
@@ -213,6 +217,7 @@ def test_entry_exit_actions():
 
     sm.start(context=sm)
     sm.trigger(Event.CONNECT, sm)
+    sm.stop()
     assert results == ["exited_offline", "entered_online", "on_transition"], (
         "Actions fired in wrong order"
     )
@@ -223,6 +228,7 @@ def test_empty_map_error():
 
     try:
         sm.build(initial_state=State.OFFLINE, verbose=True)
+        sm.stop()
     except TransitionMapError as e:
         return e
     except Exception as e:
@@ -293,6 +299,9 @@ def test_async_exit_entry_actions():
             sm2.trigger(Event.CONNECT, ctx2),
             sm3.start(context=ctx3),
             sm3.trigger(Event.CONNECT, ctx3),
+            sm.stop(),
+            sm2.stop(),
+            sm3.stop(),
             return_exceptions=True,
         )
 
@@ -343,6 +352,7 @@ def test_async_transitions():
             sm.start(context=ctx),
             sm.trigger(Event.CONNECT, ctx),
             sm.trigger(Event.RESTORE, ctx),
+            sm.stop(),
             return_exceptions=True,
         )
 
