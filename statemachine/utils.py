@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from enum import Enum
 from typing import TYPE_CHECKING
-
 from .definitions import EngineEvent
-from .exceptions import InvalidState, TransitionMapError
 
 if TYPE_CHECKING:
-    from .definitions import EventRecord, StateMachineConfig
+    from .definitions import EventRecord
 
 
 def format_event_log(record: EventRecord) -> str:
@@ -42,31 +39,3 @@ def ensure_tuple(obj) -> tuple:
     elif isinstance(obj, (list, set, tuple)):
         return tuple(obj)
     return ()
-
-
-def validate_config(config: StateMachineConfig) -> None:
-    initial_state = config.initial_state
-    if not config.transitions and initial_state not in config.on_exit:
-        raise TransitionMapError(machine_name=config.name)
-
-    if initial_state not in config.states:
-        raise InvalidState(initial_state=initial_state)
-
-    state_type = type(initial_state)
-    for state in config.states:
-        if not isinstance(state, Enum):
-            raise TypeError(
-                f"State '{state}' must be an Enum, not {type(state).__name__}."
-            )
-
-        if not isinstance(state, state_type):
-            raise TypeError(
-                f"Inconsistent Enum class: '{state}' is a {type(state).__name__}, "
-                f"but the machine expects {state_type.__name__}."
-            )
-
-    for event in config.events:
-        if not isinstance(event, Enum) and event is not None:
-            raise TypeError(
-                f"Event '{event}' must be an Enum, not {type(event).__name__}."
-            )

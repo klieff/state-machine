@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 
+from .exceptions import InvalidState, TransitionMapError
+
 type Action[C] = Callable[[C], Awaitable[None] | None]
 type Guard[C] = Callable[[C], Awaitable[bool] | bool]
 type EntryExitAction[S, C] = dict[S, list[Action[C]]]
@@ -39,6 +41,33 @@ class StateMachineConfig[S: Enum, E: Enum, C]:
     on_transition: TransitionAction[S, C]
     transitions: TransitionMap[S, E, C]
     verbose: bool
+
+    def __post_init__(self) -> None:
+        initial_state = self.initial_state
+        if not self.transitions and initial_state not in self.on_exit:
+            raise TransitionMapError(machine_name=self.name)
+
+        if initial_state not in self.states:
+            raise InvalidState(initial_state=initial_state)
+
+        state_type = type(initial_state)
+        for state in self.states:
+            if not isinstance(state, Enum):
+                raise TypeError(
+                    f"State '{state}' must be an Enum, not {type(state).__name__}."
+                )
+
+            if not isinstance(state, state_type):
+                raise TypeError(
+                    f"Inconsistent Enum class: '{state}' is a {type(state).__name__}, "
+                    f"but the machine expects {state_type.__name__}."
+                )
+
+        for event in self.events:
+            if not isinstance(event, Enum) and event is not None:
+                raise TypeError(
+                    f"Event '{event}' must be an Enum, not {type(event).__name__}."
+                )
 
 
 @dataclass(slots=True)

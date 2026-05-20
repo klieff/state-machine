@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import itertools
-from inspect import isawaitable
 from collections import deque
 from collections.abc import Awaitable, Callable
 from enum import Enum
-from typing import TYPE_CHECKING, ClassVar, Collection, Literal, overload
+from typing import TYPE_CHECKING, ClassVar, Collection
 
 from .definitions import EngineEvent, EventDetails, EventRecord, StateMachineConfig
 
 # from .engine import AsyncEngine, SyncEngine
 from .engine_async import AsyncEngine
 from .exceptions import UninitializedError
-from .utils import ensure_tuple, format_event_log, get_obj_name, validate_config
+from .utils import ensure_tuple, format_event_log, get_obj_name
 
 if TYPE_CHECKING:
     from .definitions import (
@@ -98,7 +97,6 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
             on_transition=self._on_transition,
             verbose=verbose,
         )
-        validate_config(config)
         return StateMachine[S, E, C](
             config=config, audit_sink=self._audit_sink, is_async=False
         )
@@ -119,14 +117,11 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
             on_transition=self._on_transition,
             verbose=verbose,
         )
-        validate_config(config)
         return StateMachine[S, E, C](
             config=config, audit_sink=self._audit_sink, is_async=True
         )
 
 
-# TODO : Also think about threadsafety in both sync & async engines:
-#        For threaded cases use thread locks and for async use an async queue
 class StateMachine[S: Enum, E: Enum, C]:  # , bool]:
     def __init__(
         self,

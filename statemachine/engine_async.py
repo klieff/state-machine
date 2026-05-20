@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Awaitable, Coroutine, Iterable
 from concurrent.futures import Future
-from collections.abc import Callable, Iterable, Awaitable, Coroutine
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from enum import Enum
 from inspect import isawaitable
 from typing import TYPE_CHECKING, Any, Literal
-from dataclasses import dataclass
 
 from .definitions import EngineEvent
 from .exceptions import (
@@ -63,7 +62,7 @@ class EngineRuntime:
         self._thread.join()
 
 
-class BaseEngine[S: Enum, E: Enum]:
+class BaseEngine[S: Enum]:
     _runtime: EngineRuntime = EngineRuntime()
     _running_instances: int = 0
 
@@ -129,7 +128,7 @@ class BaseEngine[S: Enum, E: Enum]:
 
 
 class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
-    # TODO : Move error handling and event dispatching to this class?
+    # TODO: Move error handling and event dispatching to this class?
     #        Hmm...a proper error handler is probably much cleaner.
     def start_engine(self, state: S, context: C, is_async: bool) -> Awaitable | None:
         self._start_worker()
@@ -171,7 +170,7 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
         source_state = self._state
         transitions = await self.resolve_transitions(state=source_state, event=event)
 
-        # TODO : a source state has multiple automatic transitions decide
+        # TODO: a source state has multiple automatic transitions decide
         #        on how to evaluate them - maybe based on priority
         transition_depth = 0
         while transitions and transition_depth < self._transition_depth:
@@ -317,11 +316,13 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
         transitions = self.sm._config.transitions.get((state, event))
         if not transitions and event is not None:
             self.sm._dispatch_event(
-                machine_event=EngineEvent.EXCEPTION,
+                # machine_event=EngineEvent.EXCEPTION,
+                machine_event=EngineEvent.TRANSITION_FAIL,
+                source=state,
                 error_type=InvalidTransition,
                 error_message=f"No transition map registered for {event}",
             )
-            raise InvalidTransition(event_record=asdict(self.sm._event_log[-1]))
+            # raise InvalidTransition(event_record=asdict(self.sm._event_log[-1]))
 
         return transitions
 
