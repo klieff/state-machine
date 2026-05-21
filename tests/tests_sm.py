@@ -1,18 +1,15 @@
 import asyncio
 import time
 from types import SimpleNamespace
-from enum import Enum
+from enum import Enum, auto
 from graphviz import Digraph
 
-from sm_core import (
+from .statemachine import StateMachineBuilder
+from .definitions import TransitionMap
+from .exceptions import (
     BlockedTransition,
     InvalidTransition,
-    StateMachine,
-    StateMachineBuilder,
     TransitionMapError,
-    ProxyTransitionMap,
-    TransitionMap,
-    auto,
 )
 
 
@@ -93,18 +90,16 @@ def test_dead_state_exit():
     result = []
 
     def test_guard_fail(ctx):
-        print("Hello from", test_guard_fail.__name__)
         return True
 
     def test_on_exit(ctx):
-        print("Hello from", test_on_exit.__name__)
         result.append(True)
 
     def test_on_action1(ctx):
-        print("Hello from", test_on_action1.__name__)
+        pass
 
     def test_on_action2(ctx):
-        print("Hello from", test_on_action2.__name__)
+        pass
 
     sm_model = (
         StateMachineBuilder[State, Event, Context]()
@@ -126,10 +121,10 @@ def test_dead_state_exit():
     # visualize_state_machine(tm)
 
     sm = sm_model.build(initial_state=State.OFFLINE, verbose=True)
-    a = sm.start(context=Context())
-    print(a)
+    sm.start(context=Context())
+    sm.stop()
     # sm.trigger(event=Event.CONNECT, context=Context())
-    assert result == [True], f"Expected True, got {result}"
+    assert result == [True, True], f"Expected True, got {result}"
 
 
 def test_valid_transition():
@@ -137,14 +132,16 @@ def test_valid_transition():
         pass
 
     sm = (
-        StateMachineBuilder[State, Event, StateMachine]()
+        StateMachineBuilder[State, Event, Context]()
         .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE, action=test_action)
         .build(initial_state=State.OFFLINE, verbose=True)
     )
 
     sm.start(context=sm)
     sm.trigger(Event.CONNECT, context=sm)
-    assert sm._state == State.ONLINE, f"Expected ONLINE, got {sm._state}"
+    sm.stop()
+    state = sm.get_state()
+    assert state == State.ONLINE, f"Expected ONLINE, got {state}"
 
 
 def test_invalid_transition_error():
@@ -156,6 +153,7 @@ def test_invalid_transition_error():
     try:
         sm.start(context=Context())
         sm.trigger(Event.DISCONNECT, Context())
+        sm.stop()
     except InvalidTransition as e:
         return e
     except Exception as e:
@@ -172,7 +170,7 @@ def test_transition_guards():
         return False
 
     sm = (
-        StateMachineBuilder[State, Event, StateMachine]()
+        StateMachineBuilder[State, Event, Context]()
         .add_transition(
             State.OFFLINE, Event.CONNECT, State.ONLINE, guard=test_guard_pass
         )
@@ -182,10 +180,12 @@ def test_transition_guards():
 
     sm.start(context=sm)
     sm.trigger(Event.CONNECT, sm)
-    assert sm._state == State.ONLINE, f"Expected ONLINE, got {sm._state}"
+    state = sm.get_state()
+    assert state == State.ONLINE, f"Expected ONLINE, got {state}"
 
     try:
         sm.trigger(Event.FETCH, sm)
+        sm.stop()
     except BlockedTransition as e:
         return e
     except Exception as e:
@@ -207,7 +207,7 @@ def test_entry_exit_actions():
         results.append("on_transition")
 
     sm = (
-        StateMachineBuilder[State, Event, StateMachine]()
+        StateMachineBuilder[State, Event, Context]()
         .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE)
         .on_exit(State.OFFLINE, test_exit_action)
         .on_entry(State.ONLINE, test_enter_action)
@@ -217,6 +217,7 @@ def test_entry_exit_actions():
 
     sm.start(context=sm)
     sm.trigger(Event.CONNECT, sm)
+    sm.stop()
     assert results == ["exited_offline", "entered_online", "on_transition"], (
         "Actions fired in wrong order"
     )
@@ -287,13 +288,70 @@ def test_async_exit_entry_actions():
     sm3 = sm_rules.build_async(initial_state=State.OFFLINE, name="SM_3", verbose=True)
 
     async def run_async_tests():
-        ctx = SimpleNamespace(time=(1, 2), name=sm._name)
-        ctx2 = SimpleNamespace(time=(0.5, 1.25), name=sm2._name)
-        ctx3 = SimpleNamespace(time=(1.5, 2.5), name=sm3._name)
+        ctx = SimpleNamespace(time=(1, 2), name=sm._config.name)
+        ctx2 = SimpleNamespace(time=(0.5, 1.25), name=sm2._config.name)
+        ctx3 = SimpleNamespace(time=(1.5, 2.5), name=sm3._config.name)
         await asyncio.gather(
+            sm.start(context=ctx),
             sm.trigger(Event.CONNECT, ctx),
+            sm.stop(),
+            sm2.start(context=ctx2),
             sm2.trigger(Event.CONNECT, ctx2),
+            sm2.stop(),
+            sm3.start(context=ctx3),
             sm3.trigger(Event.CONNECT, ctx3),
+            sm3.stop(),
+            return_exceptions=True,
+        )
+
+    start_time = time.perf_counter()
+    asyncio.run(run_async_tests())
+    end_time = time.perf_counter()
+    print(f"Total time: {end_time - start_time:.2f} seconds")
+
+    results2 = (("ONLINE",) * 3, results)
+    assert results2 == (
+        ("ONLINE",) * 3,
+        ["SM_2", "SM_1", "SM_3", "SM_2", "SM_1", "SM_3"],
+    ), "Actions fired in wrong order"
+
+
+def test_async_transitions():
+    results = []
+
+    async def async_action1(ctx):
+        await asyncio.sleep(ctx.time[0])
+        results.append(ctx.name)
+
+    async def async_action2(ctx):
+        await asyncio.sleep(ctx.time[1])
+        results.append(ctx.name)
+
+    def test_guard_sync(ctx):
+        print("Waiting for sync function...")
+        time.sleep(2)
+        results.append(ctx.name)
+        return True
+
+    async def test_guard_async(ctx):
+        print("Waiting for async function...")
+        await asyncio.sleep(ctx.time[1])
+        return False
+
+    sm_rules = (
+        StateMachineBuilder[State, Event, SimpleNamespace]()
+        .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE, async_action1)
+        .add_transition(State.ONLINE, Event.RESTORE, State.RESTORING, async_action2)
+    )
+    sm = sm_rules.build_async(initial_state=State.OFFLINE, name="SM_1", verbose=True)
+
+    async def run_async_tests():
+        ctx = SimpleNamespace(time=(2, 1), name=sm._config.name)
+        await asyncio.gather(
+            sm.start(context=ctx),
+            sm.trigger(Event.CONNECT, ctx),
+            sm.trigger(Event.RESTORE, ctx),
+            sm.stop(),
             return_exceptions=True,
         )
 
@@ -320,7 +378,7 @@ def run_tests():
         (test_empty_map_error, "EMPTY TRANSITION MAP ERROR"),
         (test_state_machine_immutability, "STATE MACHINE WEAK IMMUTABILITY"),
         (test_async_exit_entry_actions, "ASYNCHRONOUS EXIT & ENTRY ACTIONS"),
-        # (test_async_transitions,
+        (test_async_transitions, "ASYNCHRONOUS RACE CONDITIONS"),
         # (test_blocking_async,
     )
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, ClassVar, Collection
 from .audit import AuditRecord
 from .definitions import EngineEvent, EngineStep, StateMachineConfig
 from .dispatcher import EventDispatcher
-from .engine_async import AsyncEngine
+from .engine import AsyncEngine
 from .exceptions import UninitializedError
 from .utils import ensure_tuple
 
