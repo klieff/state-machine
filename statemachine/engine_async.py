@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Awaitable, Coroutine, Iterable
+from collections.abc import Awaitable, Coroutine, Iterable, Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum
@@ -29,40 +29,56 @@ class EngineRuntime:
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
-            name="SMEngineRuntime",
+            name="SMEngineThread",
             target=self._run_loop,
             daemon=True,
         )
 
-    @property
-    def loop(self) -> asyncio.AbstractEventLoop:
-        return self._loop
-
     def _run_loop(self) -> None:
-        asyncio.set_event_loop(self._loop)
+        asyncio.set_event_loop(loop=self._loop)
         self._loop.run_forever()
+
+    def call_soon(self, callback: Callable[..., Any], *args: Any) -> None:
+        self._loop.call_soon_threadsafe(callback, *args)
+
+    def create_future(self) -> asyncio.Future:
+        self.assert_runtime_thread()
+        return self._loop.create_future()
+
+    def create_task[R](self, coro: Coroutine[Any, Any, R]) -> asyncio.Task[R]:
+        self.assert_runtime_thread()
+        return self._loop.create_task(coro=coro)
 
     def submit[R](self, coro: Coroutine[Any, Any, R]) -> Future[R]:
         return asyncio.run_coroutine_threadsafe(coro=coro, loop=self._loop)
 
     async def submit_async[R](self, coro: Coroutine[Any, Any, R]) -> R:
-        future = self.submit(coro)
+        future = self.submit(coro=coro)
         return await asyncio.wrap_future(future)
-
-    def is_running(self):
-        return self._thread.is_alive()
 
     def start(self) -> None:
         self._thread.start()
 
-    def stop(self) -> None:
+    def shutdown(self) -> None:
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join()
 
+    def is_running(self) -> bool:
+        return self._thread.is_alive()
 
+    def is_runtime_thread(self) -> bool:
+        return threading.current_thread() is self._thread
+
+    def assert_runtime_thread(self) -> None:
+        if not self.is_runtime_thread():
+            raise RuntimeError(
+                "State machine internals must run on the runtime thread."
+            )
+
+
+# TODO: Implement a drain queue instead of a permanent queue per instance
 class BaseEngine[S: Enum]:
     _runtime: EngineRuntime = EngineRuntime()
-    _running_instances: int = 0
 
     def __init__(
         self,
@@ -75,39 +91,32 @@ class BaseEngine[S: Enum]:
         self._state = config.initial_state
         self._transition_depth = transition_depth
 
-    async def _setup_on_runtime_loop(self) -> None:
+    async def _start_on_runtime_loop(self) -> None:
         self._queue: asyncio.Queue[TaskRequest | Literal["STOP"]] = asyncio.Queue()
-        self._worker_task = asyncio.create_task(self._worker())
-
-    async def _queue_task(self, task: Coroutine) -> None:
-        self._assert_runtime_thread()
-
-        future = self._runtime.loop.create_future()
-        await self._queue.put(TaskRequest(task=task, future=future))
-        await future
+        self._worker_task = self._runtime.create_task(self._worker())
 
     def _start_worker(self) -> None:
         if not self._runtime.is_running():
             self._runtime.start()
 
-        self._runtime.submit(self._setup_on_runtime_loop()).result()
-        BaseEngine._running_instances += 1
+        self._runtime.submit(self._start_on_runtime_loop()).result()
 
     async def _stop_worker(self) -> None:
-        self._assert_runtime_thread()
-
         if self._worker_task.done():
             return
 
         await self._queue.put("STOP")
         await self._queue.join()
         await self._worker_task
-        BaseEngine._running_instances -= 1
+
+    async def _queue_task(self, task: Coroutine) -> None:
+        future = self._runtime.create_future()
+        await self._queue.put(TaskRequest(task=task, future=future))
+        await future
 
     async def _worker(self) -> None:
         while True:
             request = await self._queue.get()
-
             if request == "STOP":
                 self._queue.task_done()
                 break
@@ -120,15 +129,9 @@ class BaseEngine[S: Enum]:
             finally:
                 self._queue.task_done()
 
-    async def _get_state_impl(self) -> S:
-        self._assert_runtime_thread()
+    async def _get_state(self) -> S:
+        self._runtime.assert_runtime_thread()
         return self._state
-
-    def _assert_runtime_thread(self) -> None:
-        if threading.current_thread() is not self._runtime._thread:
-            raise RuntimeError(
-                "State machine internals must run on the runtime thread."
-            )
 
 
 # TODO: Implement a dedicated error handler
@@ -163,9 +166,9 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
             timeline=[MicroStep()],
         )
 
+        # FIX: if force==True throws an exception on return
         if force:
-            self._runtime.stop()
-            raise RuntimeError("Engine forcefully halted.")
+            self._runtime.shutdown()
 
         if is_async:
 

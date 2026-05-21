@@ -1,6 +1,7 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Any
 
 from .exceptions import InvalidState, TransitionMapError
 
@@ -10,6 +11,29 @@ type EntryExitAction[S, C] = dict[S, list[Action[C]]]
 type TransitionAction[S, C] = dict[tuple[S, S], list[Action[C]]]
 type Transition[S, C] = tuple[S, tuple[Action[C]] | None, tuple[Guard[C]] | None]
 type TransitionMap[S, E, C] = dict[tuple[S, E | None], list[Transition[S, C]]]
+
+type State = Enum
+type Event = Enum
+
+
+# TODO: Maybe use a dedicated Transition object rather than a generic
+@dataclass(slots=True, frozen=True)
+class TransitionObject:
+    source: State
+    target: State
+    event: Event | None
+    guards: tuple[Guard] | None = None
+    actions: tuple[Action] | None = None
+
+
+# TODO: Context that is passed to user-defined callbacks
+@dataclass(slots=True, frozen=True)
+class MachineContext:
+    source: State
+    target: State
+    event: Event
+    payload: Any
+    machine: Any  # reference to SM instance
 
 
 class EngineEvent(Enum):
