@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 
 project.md
+threadsafe.md
 todo.md
 *.dot
 *.log
