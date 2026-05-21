@@ -4,9 +4,9 @@ from types import SimpleNamespace
 from enum import Enum, auto
 from graphviz import Digraph
 
-from .statemachine import StateMachineBuilder
-from .definitions import TransitionMap
-from .exceptions import (
+from ..statemachine import StateMachineBuilder
+from ..statemachine.definitions import TransitionMap
+from ..statemachine.exceptions import (
     BlockedTransition,
     InvalidTransition,
     TransitionMapError,

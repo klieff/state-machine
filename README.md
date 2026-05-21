@@ -1,28 +1,40 @@
-# Event-Driven State Machine (⚠️ work in progress)
+# Event-Driven State Machine
 
-* Transient state support
-* Supports various `actions` and `guards` that can run before, during, or after a
-  state transition
-  * `Transition` actions run during a state change and connects State 1 and State 2
-  * `On-exit` actions run before a state change and before transition actions
-  * `On-entry` actions run after a state change and after transition actions
-* `Actions` can be executed synchronously or asynchronously
-  * `Asynchronous actions` are non-preemptive and **self-blocking** (run sequentially)
-  * This is a safety precaution since actions running concurrently can lead to
-    race conditions
-  * As a consequence transitions are treated as transactional sequences
-* `Guards` are executed synchronously and expected to return a **boolean**
-* Non-deterministic transitions (multiple valid state transitions)
-  * Apply a 'First-Match-Wins' strategy based on order of insertion
-* Self-transitions
-  * Internal transitions: not leaving the state
-  * External self-transitions: exits and re-enters state
+>🚫 Work in progress...
 
-## Internal Event handling
+## Overview
+
+* Builder interface for quick and easy state machine configuration (see examples below).
+* Supports event-triggered and eventless (automatic/transient) state transitions:
+  * Transitions are treated transactionally on a per state-machine-instance basis to
+  ensure atomicity. This means that transitions are serialized in a queue and processed
+  sequentially.
+  * The state machine execution logic is thread-safe running on a dedicated thread
+  with its own event loop.
+    * **NOTE:** By default all state machine instances share the same execution thread.
+    Therefore, any blocking callbacks will block the entire thread and consequently
+    all other state machine instances. To avoid this ensure that awaitable callbacks
+    are passed. If required, a state machine instance can spawn its own dedicated
+    execution thread and event loop. In this case one should be mindful of the
+    resource overhead associated with spawning multiple threads.
+* Support for user-defined `Actions` (callbacks) that can be executed synchronously or
+asynchronously (see **NOTE** above). Actions are defined in terms of their type and run
+before, during, or after a state transition:
+  * `transition action`: runs during a state change connecting State A to State B.
+  * `on-exit action`: runs immediately before leaving a state and before transition actions.
+  * `on-entry action`: runs immediate on entering a new state and after transition actions.
+* Supports `Guards` (predicates) which are expected to return a `boolean`.
+* Supports non-deterministic transitions (multiple valid state transitions):
+  * Applies an *First-Match-Wins* strategy based on order of insertion.
+* Supports lifecycle self-transitions:
+  * Internal self-transitions that do not leave the state.
+  * External self-transitions that exits and re-enters the state.
+
+## Internal Execution Flow
 
 On an Event Trigger:
-Evaluate Guard Predicates -> Execute On-Exit Actions -> Execute Transition Actions ->
-State Change -> Execute On-Entry Actions -> Execute On-Transition Actions ->
+> Evaluate Guard Predicates → Execute On-Exit Actions → Execute Transition Actions →
+State Change → Execute On-Entry Actions → Execute On-Transition Actions →
 Execute Automatic Transitions
 
 ## Builder methods
@@ -34,7 +46,7 @@ Execute Automatic Transitions
 * `.on_transition(source, target, action)`: defines global transition observers
 * `.on_exit(source, action)` and `.on_entry(source, action)`: define lifecycle callbacks
 
-Other interesting on_methods:
+Other on_methods:
 
 * `.on_failure(...)`
 * `.on_invalid_transition(...)`

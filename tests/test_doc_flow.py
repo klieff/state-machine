@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 from graphviz import Digraph
 
-from .statemachine import StateMachineBuilder
-from .definitions import TransitionMap
+from ..statemachine import StateMachineBuilder
+from ..statemachine.definitions import TransitionMap
 
 
 class State(Enum):
