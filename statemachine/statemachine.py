@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import itertools
-from collections import deque
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import TYPE_CHECKING, ClassVar, Collection
 
-from .definitions import EngineEvent, EventDetails, EventRecord, StateMachineConfig
-
-# from .engine import AsyncEngine, SyncEngine
+from .audit import AuditRecord
+from .definitions import EngineEvent, EngineStep, StateMachineConfig
+from .dispatcher import EventDispatcher
 from .engine_async import AsyncEngine
 from .exceptions import UninitializedError
-from .utils import ensure_tuple, format_event_log, get_obj_name
+from .utils import ensure_tuple
 
 if TYPE_CHECKING:
     from .definitions import (
@@ -22,9 +21,6 @@ if TYPE_CHECKING:
         TransitionAction,
         TransitionMap,
     )
-
-
-MAX_EVENT_LOG = 200
 
 
 class StateMachineBuilder[S: Enum, E: Enum, C]:
@@ -82,7 +78,11 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
         return self
 
     def build(
-        self, initial_state: S, name: str | None = None, verbose: bool = False
+        self,
+        initial_state: S,
+        name: str | None = None,
+        verbose: bool = False,
+        is_async: bool = False,
     ) -> StateMachine[S, E, C]:
         self._states.add(initial_state)
 
@@ -98,28 +98,39 @@ class StateMachineBuilder[S: Enum, E: Enum, C]:
             verbose=verbose,
         )
         return StateMachine[S, E, C](
-            config=config, audit_sink=self._audit_sink, is_async=False
+            config=config, audit_sink=self._audit_sink, is_async=is_async
         )
 
     def build_async(
         self, initial_state: S, name: str | None = None, verbose: bool = False
     ) -> StateMachine[S, E, C]:
-        self._states.add(initial_state)
+        return self.build(
+            initial_state=initial_state, name=name, verbose=verbose, is_async=True
+        )
 
-        config = StateMachineConfig[S, E, C](
-            name=name or self._name,
-            initial_state=initial_state,
-            events=self._events,
-            states=self._states,
-            transitions=self._transitions,
-            on_entry=self._on_entry,
-            on_exit=self._on_exit,
-            on_transition=self._on_transition,
-            verbose=verbose,
-        )
-        return StateMachine[S, E, C](
-            config=config, audit_sink=self._audit_sink, is_async=True
-        )
+
+# FIX: TEST AUDIT CALLBACK - REMOVE
+def audit_sink_callback(record: AuditRecord) -> None:
+    for step in record.timeline:
+        timestamp = step.timestamp.strftime("%H:%M:%S.%f")[:-3]
+        microstep = f"[{step.micro_step}]" if step.micro_step else ""
+        event = f"{record.machine_event} {microstep}"
+        line = f"[{timestamp}] {event:<35} Source: {record.source_state}"
+
+        detail_str = ""
+        if EngineEvent.EVENT_TRIGGER.name in record.machine_event:
+            detail_str += f" Event: {record.trigger_event}"
+        if EngineEvent.NULL_TRANSITION.name in record.machine_event:
+            detail_str += f" Event: {record.trigger_event}"
+        if record.target_state and step.micro_step != EngineStep.GUARD_SKIP.name:
+            detail_str += f" -> Target: {record.target_state}"
+        if step.target:
+            res = "PASS" if step.result else "FAIL"
+            detail_str += f" Action [{res}]: {step.target}"
+        # if details.error_message:
+        #     detail_str += f" Exception [{details.error_type}]: {details.error_message}"
+
+        print(f"{line}{detail_str}")
 
 
 class StateMachine[S: Enum, E: Enum, C]:  # , bool]:
@@ -129,23 +140,21 @@ class StateMachine[S: Enum, E: Enum, C]:  # , bool]:
         audit_sink: Callable | None = None,
         is_async: bool = False,
     ) -> None:
-        self._state = config.initial_state
-        self._event = None
-        self._target = None
+        dispatcher = EventDispatcher()
+        dispatcher.subscribe(callback=audit_sink_callback)
+
         self._config = config
-        self._engine = AsyncEngine(sm=self, transition_depth=10)
-        self._event_log = deque(maxlen=MAX_EVENT_LOG)
-        self._audit_sink = audit_sink
-        self._initialized = False
         self._is_async = is_async
+        self._initialized = False
+        self._engine = AsyncEngine(
+            config=config, dispatcher=dispatcher, transition_depth=10
+        )
 
     def start(self, context: C) -> Awaitable | None:
         if self._initialized:
             return
 
         self._initialized = True
-        self._dispatch_event(machine_event=EngineEvent.MACHINE_START)
-
         return self._engine.start_engine(
             state=self._config.initial_state, context=context, is_async=self._is_async
         )
@@ -158,43 +167,10 @@ class StateMachine[S: Enum, E: Enum, C]:  # , bool]:
         if not self._initialized:
             raise UninitializedError(machine_name=self._config.name)
 
-        self._event = event
-        self._dispatch_event(machine_event=EngineEvent.EVENT_TRIGGER)
-        self._event = None
-
         return self._engine.event_trigger(
             event=event, context=context, is_async=self._is_async
         )
 
-    def _apply_transition(self, target: S) -> None:
-        source = self._state
-        self._state = target
-        self._dispatch_event(
-            machine_event=EngineEvent.STATE_CHANGE, source=source, target=target
-        )
-
-    def _dispatch_event(self, machine_event: EngineEvent, **kwargs) -> EventRecord:
-        record = self._record_event(machine_event, **kwargs)
-        if self._config.verbose:
-            print(format_event_log(record))
-        return record
-
-    def _record_event(
-        self, machine_event: EngineEvent, **kwargs
-    ) -> EventRecord[S, E, C]:
-        details = EventDetails[S, E, C](
-            source=self._state, target=self._target, event=self._event
-        )
-        for key, value in kwargs.items():
-            if key in {"action", "action_type", "guard", "error_type"}:
-                value = get_obj_name(value)
-            setattr(details, key, value)
-
-        record = EventRecord[S, E, C](
-            machine=self._config.name,
-            machine_event=machine_event.name,
-            details=details,
-        )
-
-        self._event_log.append(record)
-        return record
+    # FIX: Create a dedicated state retriever in engine_async.py
+    def get_state(self) -> S:
+        return self._engine._state

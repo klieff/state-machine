@@ -142,7 +142,8 @@ def test_valid_transition():
     sm.start(context=sm)
     sm.trigger(Event.CONNECT, context=sm)
     sm.stop()
-    assert sm._state == State.ONLINE, f"Expected ONLINE, got {sm._state}"
+    state = sm.get_state()
+    assert state == State.ONLINE, f"Expected ONLINE, got {state}"
 
 
 def test_invalid_transition_error():
@@ -181,7 +182,8 @@ def test_transition_guards():
 
     sm.start(context=sm)
     sm.trigger(Event.CONNECT, sm)
-    assert sm._state == State.ONLINE, f"Expected ONLINE, got {sm._state}"
+    state = sm.get_state()
+    assert state == State.ONLINE, f"Expected ONLINE, got {state}"
 
     try:
         sm.trigger(Event.FETCH, sm)

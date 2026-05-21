@@ -122,8 +122,8 @@ def test_dead_state_exit():
         .on_entry(State.PROCESSED, test_on_exit)
     )
 
-    tm = sm_model.get_transition_map()
-    visualize_state_machine(tm)
+    # tm = sm_model.get_transition_map()
+    # visualize_state_machine(tm)
 
     sm = sm_model.build(initial_state=State.OFFLINE, verbose=True)
     a = sm.start(context=Context())
