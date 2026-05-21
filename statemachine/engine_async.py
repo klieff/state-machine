@@ -149,11 +149,10 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
             self._dispatcher.emit(record)
 
         coro = self.evaluate_initial_state(state=state, context=context)
-
         if is_async:
             return self._runtime.submit_async(self._queue_task(coro))
-        else:
-            return self._runtime.submit(self._queue_task(coro)).result()
+
+        return self._runtime.submit(self._queue_task(coro)).result()
 
     def stop_engine(self, is_async: bool, force: bool = False) -> Awaitable | None:
         record = AuditRecord(
@@ -175,21 +174,20 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
                 self._dispatcher.emit(record)
 
             return _stop_engine_wrapper()
-        else:
-            self._dispatcher.emit(record)
-            return self._runtime.submit(self._stop_worker()).result()
+
+        self._dispatcher.emit(record)
+        return self._runtime.submit(self._stop_worker()).result()
 
     def event_trigger(self, event: E, context: C, is_async: bool) -> Awaitable | None:
         coro = self.evaluate_transitions(event=event, context=context)
 
         if is_async:
             return self._runtime.submit_async(self._queue_task(coro))
-        else:
-            try:
-                return self._runtime.submit(self._queue_task(coro)).result()
-            except Exception as e:
-                self._runtime.submit(self._stop_worker()).result()
-                raise e
+        try:
+            return self._runtime.submit(self._queue_task(coro)).result()
+        except Exception as e:
+            self._runtime.submit(self._stop_worker()).result()
+            raise e
 
     async def evaluate_initial_state(self, state: S, context: C) -> None:
         await self.evaluate_on_entry(state=state, context=context)
@@ -197,10 +195,12 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
 
     async def evaluate_transitions(self, event: E | None, context: C) -> None:
         source_state = self._state
-        transitions = await self.resolve_transitions(state=source_state, event=event)
+        transitions = self.resolve_transitions(state=source_state, event=event)
 
-        # TODO: a source state has multiple automatic transitions decide
-        #        on how to evaluate them - maybe based on priority
+        # TODO: If a source state has multiple automatic transitions decide
+        #       on how to evaluate them - maybe based on a priority flag.
+        #       Currently, no audit record is logged if no event-triggered transition
+        #       exists or if MAX_TRANSITION_DEPTH has been exceeded.
         transition_depth = 0
         while transitions and transition_depth < self._transition_depth:
             machine_event = (
@@ -208,7 +208,7 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
             )
             record = AuditRecord(
                 machine_event=machine_event.name,
-                source_state=self._state.name,
+                source_state=source_state.name,
                 trigger_event="None" if event is None else event.name,
                 success=False,
             )
@@ -225,7 +225,7 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
                 await self.evaluate_on_exit(state=source_state, context=context)
                 await self.evaluate_transition_action(actions=actions, context=context)
 
-                self.apply_state_mutation(target_state)
+                self.apply_state_mutation(state=target_state)
                 record.target_state = target_state.name
                 record.success = True
 
@@ -233,18 +233,16 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
                 await self.evaluate_on_transition(
                     source=source_state, target=target_state, context=context
                 )
-
-                event = None
-                source_state = target_state
-                transitions = await self.resolve_transitions(
-                    state=source_state, event=event
-                )
-                transition_depth += 1
             except Exception as e:
                 raise RuntimeError("BIGLY error") from e
             finally:
                 active_audit_record.reset(token)
                 self._dispatcher.emit(record)
+
+            event = None
+            source_state = target_state
+            transitions = self.resolve_transitions(state=source_state, event=event)
+            transition_depth += 1
 
     def apply_state_mutation(self, state: S) -> None:
         self._state = state
@@ -324,18 +322,17 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
             return
 
         for action in actions:
-            microstep = MicroStep(target=self._state.name)
+            microstep = MicroStep(micro_step=action_type.name, target=self._state.name)
             try:
                 result = action(context)
                 result = await result if isawaitable(result) else result
-                microstep.micro_step = action_type.name
             except Exception as e:
                 microstep.micro_step = EngineEvent.EXCEPTION.name
                 raise ActionError from e
             finally:
                 self._dispatcher.log_micro_step(microstep)
 
-    async def resolve_transitions(
+    def resolve_transitions(
         self, state: S, event: E | None
     ) -> list[Transition[S, C]] | None:
         return self._config.transitions.get((state, event))
@@ -350,214 +347,3 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
     #         error_message=f"No guards passed for {event = }",
     #     )
     #     raise BlockedTransition(event_record=asdict(event_record))
-
-
-# class AsyncEngine2[S: Enum, E: Enum, C](BaseEngine):
-#     # TODO: Move error handling and event dispatching to this class?
-#     #        Hmm...a proper error handler is probably much cleaner.
-#     def start_engine(self, state: S, context: C, is_async: bool) -> Awaitable | None:
-#         self._start_worker()
-#
-#         coro = self.evaluate_initial_state(state=state, context=context)
-#
-#         if is_async:
-#             return self._runtime.submit_async(self._queue_task(coro))
-#         else:
-#             return self._runtime.submit(self._queue_task(coro)).result()
-#
-#     def stop_engine(self, is_async: bool, force: bool = False) -> Awaitable | None:
-#         if force:
-#             self._runtime.stop()
-#             raise RuntimeError("Engine forcefully halted.")
-#
-#         if is_async:
-#             return self._runtime.submit_async(self._stop_worker())
-#         else:
-#             return self._runtime.submit(self._stop_worker()).result()
-#
-#     def event_trigger(self, event: E, context: C, is_async: bool) -> Awaitable | None:
-#         coro = self.evaluate_transitions(event=event, context=context)
-#
-#         if is_async:
-#             return self._runtime.submit_async(self._queue_task(coro))
-#         else:
-#             try:
-#                 return self._runtime.submit(self._queue_task(coro)).result()
-#             except Exception as e:
-#                 self._runtime.submit(self._stop_worker()).result()
-#                 raise e
-#
-#     async def evaluate_initial_state(self, state: S, context: C) -> None:
-#         await self.evaluate_on_entry(state=state, context=context)
-#         await self.evaluate_transitions(event=None, context=context)
-#
-#     async def evaluate_transitions(self, event: E | None, context: C) -> None:
-#         source_state = self._state
-#         transitions = await self.resolve_transitions(state=source_state, event=event)
-#
-#         # TODO: a source state has multiple automatic transitions decide
-#         #        on how to evaluate them - maybe based on priority
-#         transition_depth = 0
-#         while transitions and transition_depth < self._transition_depth:
-#             target_state, actions = await self.evaluate_guards(
-#                 context=context, transitions=transitions
-#             )
-#
-#             if target_state is None:
-#                 break
-#
-#             self.sm._dispatch_event(
-#                 machine_event=EngineEvent.TRANSITION_START,
-#                 source=source_state,
-#                 target=target_state,
-#                 event=event,
-#             )
-#             await self.evaluate_on_exit(state=source_state, context=context)
-#             await self.evaluate_transition_action(
-#                 state=source_state, actions=actions, context=context
-#             )
-#             self._state = target_state
-#             self.sm._apply_transition(target=target_state)
-#             await self.evaluate_on_entry(state=target_state, context=context)
-#             await self.evaluate_on_transition(
-#                 source=source_state, target=target_state, context=context
-#             )
-#             self.sm._dispatch_event(
-#                 machine_event=EngineEvent.TRANSITION_COMPLETE,
-#                 source=source_state,
-#                 target=target_state,
-#                 event=event,
-#             )
-#             event = None
-#             source_state = target_state
-#             transitions = await self.resolve_transitions(
-#                 state=source_state, event=event
-#             )
-#             transition_depth += 1
-#
-#     async def evaluate_guards(
-#         self,
-#         context: C,
-#         transitions: list[tuple[S, tuple[Action[C]] | None, tuple[Guard[C]] | None]],
-#     ) -> tuple[S | None, tuple[Action[C]] | None]:
-#
-#         for target_state, actions, guards in transitions:
-#             if not guards or await self.execute_guards(guards=guards, context=context):
-#                 return (target_state, actions)
-#
-#         return (None, None)
-#
-#     async def evaluate_on_entry(self, state: S, context: C) -> None:
-#         await self.execute_actions(
-#             source=state,
-#             context=context,
-#             actions=self.sm._config.on_entry.get(state),
-#             action_type=EngineEvent.ON_ENTRY,
-#         )
-#
-#     async def evaluate_on_exit(self, state: S, context: C) -> None:
-#         await self.execute_actions(
-#             source=state,
-#             context=context,
-#             actions=self.sm._config.on_exit.get(state),
-#             action_type=EngineEvent.ON_EXIT,
-#         )
-#
-#     async def evaluate_on_transition(self, source: S, target: S, context: C) -> None:
-#         await self.execute_actions(
-#             source=source,
-#             context=context,
-#             actions=self.sm._config.on_transition.get((source, target)),
-#             action_type=EngineEvent.ON_TRANSITION,
-#         )
-#
-#     async def evaluate_transition_action(
-#         self, state: S, actions: tuple[Action[C]] | None, context: C
-#     ) -> None:
-#         await self.execute_actions(
-#             source=state,
-#             context=context,
-#             actions=actions,
-#             action_type=EngineEvent.TRANSITION_ACTION,
-#         )
-#
-#     async def execute_guards(self, guards: tuple[Guard[C]], context: C) -> bool:
-#         for guard in guards:
-#             try:
-#                 result = guard(context)
-#                 passed = await result if isawaitable(result) else result
-#             except Exception as e:
-#                 event_record = self.sm._dispatch_event(
-#                     machine_event=EngineEvent.EXCEPTION,
-#                     guard=guard,
-#                     error_type=GuardError,
-#                     error_message=f"<{type(e).__name__}>: {e}",
-#                 )
-#                 raise GuardError(event_record=asdict(event_record)) from e
-#
-#             self.sm._dispatch_event(
-#                 machine_event=EngineEvent.GUARD_EVALUATE, guard=guard, passed=passed
-#             )
-#
-#             if not passed:
-#                 return False
-#
-#         return True
-#
-#     async def execute_actions(
-#         self,
-#         source: S,
-#         context: C,
-#         actions: Iterable[Action[C]] | None,
-#         action_type: EngineEvent,
-#     ) -> None:
-#         if not actions:
-#             return
-#
-#         for action in actions:
-#             try:
-#                 result = action(context)
-#                 result = await result if isawaitable(result) else result
-#                 self.sm._dispatch_event(
-#                     machine_event=action_type,
-#                     source=source,
-#                     action=action,
-#                     action_type=action_type,
-#                 )
-#             except Exception as e:
-#                 event_record = self.sm._dispatch_event(
-#                     machine_event=EngineEvent.EXCEPTION,
-#                     source=source,
-#                     action=action,
-#                     action_type=action_type,
-#                     error_type=ActionError,
-#                     error_message=f"<{type(e).__name__}>: {e}",
-#                 )
-#                 raise ActionError(event_record=asdict(event_record)) from e
-#
-#     async def resolve_transitions(
-#         self, state: S, event: E | None
-#     ) -> list[tuple[S, tuple[Action[C]] | None, tuple[Guard[C]] | None]] | None:
-#         transitions = self.sm._config.transitions.get((state, event))
-#         if not transitions and event is not None:
-#             self.sm._dispatch_event(
-#                 # machine_event=EngineEvent.EXCEPTION,
-#                 machine_event=EngineEvent.TRANSITION_FAIL,
-#                 source=state,
-#                 error_type=InvalidTransition,
-#                 error_message=f"No transition map registered for {event}",
-#             )
-#             # raise InvalidTransition(event_record=asdict(self.sm._event_log[-1]))
-#
-#         return transitions
-#
-#     # async def execute_validators(self) -> None:
-#     #     event_record = self.sm._dispatch_event(
-#     #         machine_event=EngineEvent.EXCEPTION,
-#     #         source=source_state,
-#     #         target=target_state,
-#     #         event=event,
-#     #         error_type=BlockedTransition,
-#     #         error_message=f"No guards passed for {event = }",
-#     #     )
-#     #     raise BlockedTransition(event_record=asdict(event_record))

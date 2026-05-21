@@ -90,18 +90,16 @@ def test_dead_state_exit():
     result = []
 
     def test_guard_fail(ctx):
-        print("Hello from", test_guard_fail.__name__)
         return True
 
     def test_on_exit(ctx):
-        print("Hello from", test_on_exit.__name__)
         result.append(True)
 
     def test_on_action1(ctx):
-        print("Hello from", test_on_action1.__name__)
+        pass
 
     def test_on_action2(ctx):
-        print("Hello from", test_on_action2.__name__)
+        pass
 
     sm_model = (
         StateMachineBuilder[State, Event, Context]()
@@ -343,7 +341,7 @@ def test_async_transitions():
     sm_rules = (
         StateMachineBuilder[State, Event, SimpleNamespace]()
         .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE, async_action1)
-        .add_transition(State.OFFLINE, Event.RESTORE, State.RESTORING, async_action2)
+        .add_transition(State.ONLINE, Event.RESTORE, State.RESTORING, async_action2)
     )
     sm = sm_rules.build_async(initial_state=State.OFFLINE, name="SM_1", verbose=True)
 

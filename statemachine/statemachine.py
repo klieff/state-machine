@@ -114,8 +114,11 @@ def audit_sink_callback(record: AuditRecord) -> None:
     for step in record.timeline:
         timestamp = step.timestamp.strftime("%H:%M:%S.%f")[:-3]
         microstep = f"[{step.micro_step}]" if step.micro_step else ""
+        success = f"{'SUCCESS' if record.success else 'FAILED'}"
         event = f"{record.machine_event} {microstep}"
-        line = f"[{timestamp}] {event:<35} Source: {record.source_state}"
+        line = (
+            f"[{timestamp}] {event:<35} | {success:<7} | Source: {record.source_state}"
+        )
 
         detail_str = ""
         if EngineEvent.EVENT_TRIGGER.name in record.machine_event:
@@ -171,6 +174,6 @@ class StateMachine[S: Enum, E: Enum, C]:  # , bool]:
             event=event, context=context, is_async=self._is_async
         )
 
-    # FIX: Create a dedicated state retriever in engine_async.py
+    # FIX: Define a dedicated state getter in engine class def
     def get_state(self) -> S:
         return self._engine._state
