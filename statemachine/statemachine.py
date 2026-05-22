@@ -127,9 +127,11 @@ def audit_sink_callback(record: AuditRecord) -> None:
             detail_str += f" Event: {record.trigger_event}"
         if record.target_state and step.micro_step != EngineStep.GUARD_SKIP.name:
             detail_str += f" -> Target: {record.target_state}"
-        if step.target:
+        if EngineStep.GUARD_EVALUATE.name in step.micro_step:
             res = "PASS" if step.result else "FAIL"
-            detail_str += f" Action [{res}]: {step.target}"
+            detail_str += f" Guard [{res}]: {step.target}"
+        elif step.target:
+            detail_str += f" Action: {step.target}"
         # if details.error_message:
         #     detail_str += f" Exception [{details.error_type}]: {details.error_message}"
 

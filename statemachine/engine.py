@@ -323,10 +323,11 @@ class AsyncEngine[S: Enum, E: Enum, C](BaseEngine):
             return
 
         for action in actions:
-            microstep = MicroStep(micro_step=action_type.name, target=self._state.name)
+            microstep = MicroStep(micro_step=action_type.name, target=action.__name__)
             try:
                 result = action(context)
                 result = await result if isawaitable(result) else result
+                microstep.result = result
             except Exception as e:
                 microstep.micro_step = EngineEvent.EXCEPTION.name
                 raise ActionError from e

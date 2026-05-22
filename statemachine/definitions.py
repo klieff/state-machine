@@ -5,6 +5,7 @@ from typing import Any
 
 from .exceptions import InvalidState, TransitionMapError
 
+type Action2[CTX, PAY] = Callable[[CTX, PAY], Awaitable[None] | None]
 type Action[C] = Callable[[C], Awaitable[None] | None]
 type Guard[C] = Callable[[C], Awaitable[bool] | bool]
 type EntryExitAction[S, C] = dict[S, list[Action[C]]]

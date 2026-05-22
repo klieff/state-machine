@@ -1,12 +1,13 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 
 @dataclass(slots=True)
 class MicroStep:
     micro_step: str = ""
     target: str = ""
-    result: str | bool = ""
+    result: Any = None
     timestamp: datetime = field(default_factory=datetime.now)
 
 
