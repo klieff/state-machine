@@ -148,26 +148,24 @@ class StateMachine[S: Enum, E: Enum, C]:  # , bool]:
 
         self._config = config
         self._is_async = is_async
-        self._initialized = False
+        self._running = False
         self._engine = AsyncEngine(
             config=config, dispatcher=dispatcher, transition_depth=10
         )
 
     def start(self, context: C) -> Awaitable | None:
-        if self._initialized:
+        if self._running:
             return
 
-        self._initialized = True
-        return self._engine.start_engine(
-            state=self._config.initial_state, context=context, is_async=self._is_async
-        )
+        self._running = True
+        return self._engine.start_engine(context=context, is_async=self._is_async)
 
     def stop(self, force: bool = False):
-        self._initialized = False
+        self._running = False
         return self._engine.stop_engine(is_async=self._is_async, force=force)
 
     def trigger(self, event: E, context: C) -> Awaitable | None:
-        if not self._initialized:
+        if not self._running:
             raise UninitializedError(machine_name=self._config.name)
 
         return self._engine.event_trigger(

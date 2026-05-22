@@ -39,6 +39,7 @@ class MachineContext:
 class EngineEvent(Enum):
     MACHINE_START = auto()
     MACHINE_STOP = auto()
+    MICRO_STEP = auto()
     EVENT_TRIGGER = auto()
     TRANSITION_START = auto()
     TRANSITION_COMPLETE = auto()
