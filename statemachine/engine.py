@@ -6,7 +6,6 @@ from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum
-from inspect import isawaitable
 from typing import TYPE_CHECKING, Any, Literal
 
 from .audit import AuditRecord, MicroStep
@@ -93,7 +92,6 @@ class BaseEngine:
         self._config = config
         self._dispatcher = dispatcher
         self._transition_depth = transition_depth
-        # self._state: S = config.initial_state
         self._running: bool = False
 
     async def _start_on_runtime_loop(self) -> None:
@@ -194,42 +192,33 @@ class AsyncEngine(BaseEngine):
         if is_async:
             return self._runtime.submit_async(coro=self._queue_task(coro))
 
-        return self._runtime.submit(coro=self._queue_task(coro)).result()
+        self._runtime.submit(coro=self._queue_task(coro)).result()
 
     async def processing_loop(
         self, event: Enum | None, payload: Any | None = None
     ) -> None:
-        # source_state = self._config.states.get(self._state)
         source_state: State = self._state
-
-        # if event is None:
-        #     info: I = AuditRecord(
-        #         machine_event=EngineEvent.NULL_TRANSITION.name, payload=None
-        #     )
-        #     await self.evaluate_on_entry(state=source_state, info=info)
-
         transitions = self.resolve_transitions(state=source_state, event=event)
+
+        machine_event = (
+            EngineEvent.EVENT_TRIGGER if event else EngineEvent.NULL_TRANSITION
+        )
+        info = AuditRecord(
+            machine_event=machine_event.name,
+            source=source_state.state,
+            trigger_event="None" if event is None else event.name,
+            success=False,
+            payload=payload,
+        )
+        token = active_audit_record.set(info)
 
         # TODO: If a source state has multiple automatic transitions decide
         #       on how to evaluate them - maybe based on a priority flag.
         #       Currently, no audit record is logged if no event-triggered transition
         #       exists or if MAX_TRANSITION_DEPTH has been exceeded.
-        transition_depth = 0
-        while transitions and transition_depth < self._transition_depth:
-            try:
-                machine_event = (
-                    EngineEvent.EVENT_TRIGGER if event else EngineEvent.NULL_TRANSITION
-                )
-                info = AuditRecord(
-                    machine_event=machine_event.name,
-                    source=source_state.state,
-                    # target=source_state.name,
-                    trigger_event="None" if event is None else event.name,
-                    success=False,
-                    payload=payload,
-                )
-                token = active_audit_record.set(info)
-
+        try:
+            transition_depth = 0
+            while transitions and transition_depth < self._transition_depth:
                 transition = await self.evaluate_guards(
                     transitions=transitions, info=info
                 )
@@ -239,39 +228,45 @@ class AsyncEngine(BaseEngine):
 
                 target_state = self._config.states.get(transition.target)
 
-                if transition.target is None and transition.router:
+                if transition.router and transition.target is None:
                     result = invoke_callback(transition.router, self._context, info)
-                    new_state = await result if transition.router.is_async else result
-                    target_state = self._config.states.get(new_state)
+                    router_state = (
+                        await result if transition.router.is_async else result
+                    )
+                    target_state = self._config.states.get(router_state)
 
                 if target_state is None:
                     break
 
                 info.target = target_state.state
 
-                await self.evaluate_on_exit(state=source_state, info=info)
-                await self.evaluate_transition_action(
-                    actions=transition.actions, info=info
-                )
+                if source_state.on_exit:
+                    await self.evaluate_on_exit(state=source_state, info=info)
+
+                if transition.actions:
+                    await self.evaluate_transition_action(
+                        actions=transition.actions, info=info
+                    )
 
                 self.apply_state_mutation(state=target_state)
-                # info.target = target_state
                 info.success = True
 
-                await self.evaluate_on_entry(state=target_state, info=info)
+                if target_state.on_entry:
+                    await self.evaluate_on_entry(state=target_state, info=info)
+
                 # await self.evaluate_on_transition(
                 #     source=source_state, target=target_state, info=info
                 # )
 
                 active_audit_record.reset(token)
                 self._dispatcher.emit(info)
-            except Exception as e:
-                raise RuntimeError("BIGLY error") from e
 
-            event = None
-            source_state = target_state
-            transitions = self.resolve_transitions(state=source_state, event=event)
-            transition_depth += 1
+                event = None
+                source_state = target_state
+                transitions = self.resolve_transitions(state=source_state, event=event)
+                transition_depth += 1
+        except Exception as e:
+            raise RuntimeError("BIGLY error") from e
 
     def apply_state_mutation(self, state: State) -> None:
         self._state = state
@@ -363,7 +358,7 @@ class AsyncEngine(BaseEngine):
             )
             try:
                 result = invoke_callback(action, self._context, info)
-                result = await result if isawaitable(result) else result
+                result = await result if action.is_async else result
                 microstep.result = result
             except Exception as e:
                 microstep.micro_step = EngineEvent.EXCEPTION.name

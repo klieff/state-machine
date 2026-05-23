@@ -110,12 +110,12 @@ builder = (
         actions=record_movement,
         router=dynamic_router,
     )
-    .add_transition(
-        source=State.EATEN,
-        event=None,
-        # target=State.EATEN,
-        actions=record_movement,
-    )
+    # .add_transition(
+    #     source=State.EATEN,
+    #     event=None,
+    #     # target=State.EATEN,
+    #     actions=record_movement,
+    # )
 )
 
 # Build state machine
