@@ -23,29 +23,20 @@ type TransitionMap[S, E] = dict[tuple[S, E | None], list[Transition]]
 
 
 @dataclass(slots=True)
-class State[S: Enum]:
-    state: S
+class State:
+    state: Enum
     on_exit: list[CallbackSpec | None]
     on_entry: list[CallbackSpec | None]
 
 
 @dataclass(slots=True)
-class Transition[S: Enum, E: Enum]:
-    source: S
-    target: S | None
-    event: E | None
+class Transition:
+    source: Enum
+    target: Enum | None
+    event: Enum | None
     actions: list[CallbackSpec | None]
     guards: list[CallbackSpec | None]
-
-
-# TODO: Maybe use a dedicated Transition object rather than a generic
-@dataclass(slots=True, frozen=True)
-class TransitionInfo[S: Enum, E: Enum]:
-    source: S
-    target: S
-    event: E | None
-    guards: tuple[Callable] | None = None
-    actions: tuple[Callable] | None = None
+    router: CallbackSpec | None
 
 
 # TODO: Context that is passed to user-defined callbacks
@@ -83,34 +74,20 @@ class EngineStep(Enum):
 @dataclass(frozen=True)
 class StateMachineConfig[S: Enum, E: Enum]:
     name: str
-    initial_state: S
     events: set[E]
-    states: set[S]
-    on_entry: EntryExitAction[S]
-    on_exit: EntryExitAction[S]
-    on_transition: TransitionAction[S]
+    states: dict[S, State]
     transitions: TransitionMap[S, E]
+    on_transition: TransitionAction[S]
     verbose: bool
 
     def __post_init__(self) -> None:
-        initial_state = self.initial_state
-        if not self.transitions and initial_state not in self.on_exit:
+        if not self.transitions:
             raise TransitionMapError(machine_name=self.name)
 
-        if initial_state not in self.states:
-            raise InvalidState(initial_state=initial_state)
-
-        state_type = type(initial_state)
-        for state in self.states:
-            if not isinstance(state, (Enum, Callable, type(None))):
+        for state in self.states.keys():
+            if not isinstance(state, Enum):
                 raise TypeError(
                     f"State '{state}' must be an Enum, not {type(state).__name__}."
-                )
-
-            if not isinstance(state, (state_type, Callable, type(None))):
-                raise TypeError(
-                    f"Inconsistent Enum class: '{state}' is a {type(state).__name__}, "
-                    f"but the machine expects {state_type.__name__}."
                 )
 
         for event in self.events:

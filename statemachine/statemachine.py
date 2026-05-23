@@ -7,18 +7,15 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from .audit import AuditRecord
 from .callbacks import prepare_callbacks
-from .definitions import EngineEvent, EngineStep, StateMachineConfig
+from .definitions import EngineEvent, EngineStep, StateMachineConfig, State, Transition
 from .dispatcher import EventDispatcher
 from .engine import AsyncEngine
-from .exceptions import UninitializedError
+from .exceptions import InvalidState, UninitializedError
 
 if TYPE_CHECKING:
     from .definitions import (
         Callbacks,
-        EntryExitAction,
-        State,
         StateMachineConfig,
-        Transition,
         TransitionAction,
         TransitionMap,
     )
@@ -28,12 +25,11 @@ class StateMachineBuilder[S: Enum, E: Enum]:
     _counter: ClassVar = itertools.count(start=1)
 
     def __init__(self) -> None:
+        self._id = id(self)
         self._name = f"SM_{next(StateMachineBuilder._counter)}"
         self._events: set[E] = set()
         self._states: dict[S, State] = dict()
         self._transitions: TransitionMap[S, E] = dict()
-        # self._on_entry: EntryExitAction[S] = dict()
-        # self._on_exit: EntryExitAction[S] = dict()
         self._on_transition: TransitionAction[S] = dict()
         self._audit_sink: Callable | None = None
         self._is_async = False
@@ -43,37 +39,8 @@ class StateMachineBuilder[S: Enum, E: Enum]:
             self._audit_sink = audit_sink
         return self
 
-    def add_transition(
-        self,
-        source: S,
-        event: E | None,
-        target: S | None,
-        actions: Callbacks = None,
-        guards: Callbacks = None,
-    ) -> StateMachineBuilder[S, E]:
-        # self._states.add(source)
-
-        if event is not None:
-            self._events.add(event)
-
-        prepared_target = target
-        if callable(prepared_target):
-            prepared_target = prepare_callbacks(prepared_target).pop()
-        # elif prepared_target is not None:
-        #     self._states.add(prepared_target)
-
-        transition = Transition(
-            source=source,
-            target=target,
-            event=event,
-            actions=prepare_callbacks(actions),
-            guards=prepare_callbacks(guards),
-        )
-        self._transitions.setdefault((source, event), []).append(transition)
-        return self
-
     def add_state(
-        self, state: S, on_entry: Callbacks, on_exit: Callbacks
+        self, state: S, on_entry: Callbacks = None, on_exit: Callbacks = None
     ) -> StateMachineBuilder[S, E]:
         new_state = State(
             state=state,
@@ -83,39 +50,47 @@ class StateMachineBuilder[S: Enum, E: Enum]:
         self._states[state] = new_state
         return self
 
-    # def on_entry(self, state: S, actions: Callbacks) -> StateMachineBuilder[S, E]:
-    #     self._states.add(state)
-    #     self._on_entry.setdefault(state, []).extend(prepare_callbacks(actions))
-    #     return self
-    #
-    # def on_exit(self, state: S, actions: Callbacks) -> StateMachineBuilder[S, E]:
-    #     self._states.add(state)
-    #     self._on_exit.setdefault(state, []).extend(prepare_callbacks(actions))
-    #     return self
+    # TODO: Guard against infinite loops, e.g., add_transition(State_X, None, State_X)
+    def add_transition(
+        self,
+        source: S,
+        event: E | None = None,
+        target: S | None = None,
+        actions: Callbacks = None,
+        guards: Callbacks = None,
+        router: Callbacks = None,
+    ) -> StateMachineBuilder[S, E]:
+        if event is not None:
+            self._events.add(event)
+
+        self._transitions.setdefault((source, event), []).append(
+            Transition(
+                source=source,
+                target=target,
+                event=event,
+                actions=prepare_callbacks(actions),
+                guards=prepare_callbacks(guards),
+                router=prepare_callbacks(router).pop(),
+            )
+        )
+        return self
 
     def on_transition(
         self, source: S, target: S, actions: Callbacks
     ) -> StateMachineBuilder[S, E]:
-        # self._states.add(source)
-        # self._states.add(target)
         self._on_transition.setdefault((source, target), []).extend(
             prepare_callbacks(actions)
         )
         return self
 
     def build(
-        self, initial_state: S, name: str | None = None, verbose: bool = False
+        self, name: str | None = None, verbose: bool = False
     ) -> StateMachine[S, E]:
-        # self._states.add(initial_state)
-
         config = StateMachineConfig[S, E](
             name=name or self._name,
-            initial_state=initial_state,
             events=self._events,
             states=self._states,
             transitions=self._transitions,
-            on_entry=self._on_entry,
-            on_exit=self._on_exit,
             on_transition=self._on_transition,
             verbose=verbose,
         )
@@ -124,10 +99,10 @@ class StateMachineBuilder[S: Enum, E: Enum]:
         )
 
     def build_async(
-        self, initial_state: S, name: str | None = None, verbose: bool = False
+        self, name: str | None = None, verbose: bool = False
     ) -> StateMachine[S, E]:
         self._is_async = True
-        return self.build(initial_state=initial_state, name=name, verbose=verbose)
+        return self.build(name=name, verbose=verbose)
 
 
 # FIX: TEST AUDIT CALLBACK - REMOVE
@@ -174,12 +149,18 @@ class StateMachine[S: Enum, E: Enum]:
             config=config, dispatcher=dispatcher, transition_depth=10
         )
 
-    def start(self, context: Any) -> Awaitable | None:
+    def start(self, initial_state: S, context: Any) -> Awaitable | None:
         if self._running:
             return
 
+        state = self._config.states.get(initial_state)
+        if state is None:
+            raise InvalidState
+
         self._running = True
-        return self._engine.start_engine(context=context, is_async=self._is_async)
+        return self._engine.start_engine(
+            initial_state=state, context=context, is_async=self._is_async
+        )
 
     def stop(self, force: bool = False):
         self._running = False
@@ -194,5 +175,5 @@ class StateMachine[S: Enum, E: Enum]:
         )
 
     # FIX: Define a dedicated state getter in engine class def
-    def get_state(self) -> S:
-        return self._engine._state
+    def get_state(self) -> Enum:
+        return self._engine._state.state

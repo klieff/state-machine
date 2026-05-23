@@ -1,5 +1,12 @@
 from dataclasses import dataclass
-from inspect import Parameter, iscoroutine, iscoroutinefunction, signature
+from inspect import (
+    ClassFoundException,
+    Parameter,
+    isawaitable,
+    iscoroutine,
+    iscoroutinefunction,
+    signature,
+)
 from typing import Any, Callable, Coroutine, Iterable
 
 
@@ -40,14 +47,14 @@ def prepare_callbacks(
     return [get_callback_signature(callback) for callback in callbacks]
 
 
-def invoke_inspected_callback(
-    inspected: CallbackSpec, context: Any, info: Any
-) -> Coroutine[Any, Any, Any] | None:
-    if inspected.param_count == 0:
-        result = inspected.callback()
-    elif inspected.param_count == 1:
-        result = inspected.callback(context)
+def invoke_callback[R](
+    spec: CallbackSpec, context: Any, info: Any
+) -> Coroutine[R, Any, Any] | R:
+    if spec.param_count == 0:
+        result = spec.callback()
+    elif spec.param_count == 1:
+        result = spec.callback(context)
     else:
-        result = inspected.callback(context, info)
+        result = spec.callback(context, info)
 
     return result

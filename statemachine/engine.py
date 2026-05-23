@@ -2,23 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Awaitable, Coroutine, Iterable, Callable
+from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum
 from inspect import isawaitable
 from typing import TYPE_CHECKING, Any, Literal
 
-from statemachine.callbacks import CallbackSpec
-
 from .audit import AuditRecord, MicroStep
-from .dispatcher import active_audit_record
+from .callbacks import CallbackSpec, invoke_callback
 from .definitions import EngineEvent, EngineStep
+from .dispatcher import active_audit_record
 from .exceptions import ActionError, GuardError
 
 if TYPE_CHECKING:
+    from .definitions import StateMachineConfig, Transition, State
     from .dispatcher import EventDispatcher
-    from .definitions import Transition, StateMachineConfig
 
 
 @dataclass(slots=True)
@@ -81,7 +80,8 @@ class EngineRuntime:
 
 
 # TODO: Implement a drain queue instead of a permanent queue per instance
-class BaseEngine[S: Enum]:
+class BaseEngine:
+    _state: State
     _runtime: EngineRuntime = EngineRuntime()
 
     def __init__(
@@ -93,7 +93,7 @@ class BaseEngine[S: Enum]:
         self._config = config
         self._dispatcher = dispatcher
         self._transition_depth = transition_depth
-        self._state: S = config.initial_state
+        # self._state: S = config.initial_state
         self._running: bool = False
 
     async def _start_on_runtime_loop(self) -> None:
@@ -107,7 +107,7 @@ class BaseEngine[S: Enum]:
 
         record = AuditRecord(
             machine_event=EngineEvent.MACHINE_START.name,
-            source=self._state.name,
+            source=self._state.state,
             trigger_event="None",
             success=self._running,
             timeline=[MicroStep()],
@@ -123,7 +123,7 @@ class BaseEngine[S: Enum]:
 
             record = AuditRecord(
                 machine_event=EngineEvent.MACHINE_STOP.name,
-                source=self._state.name,
+                source=self._state.state,
                 trigger_event="None",
                 success=True,
                 timeline=[MicroStep()],
@@ -150,12 +150,12 @@ class BaseEngine[S: Enum]:
             finally:
                 self._queue.task_done()
 
-    async def _get_state(self) -> S:
+    async def _get_state(self) -> State:
         self._runtime.assert_runtime_thread()
         return self._state
 
     def _dispatch_internal_event(self, machine_event: EngineEvent) -> None:
-        record = AuditRecord(machine_event=machine_event.name, source=self._state.name)
+        record = AuditRecord(machine_event=machine_event.name, source=self._state.state)
 
         token = active_audit_record.set(record)
         active_audit_record.reset(token)
@@ -163,13 +163,16 @@ class BaseEngine[S: Enum]:
 
 
 # TODO: Implement a dedicated error handler
-class AsyncEngine[S: Enum, E: Enum](BaseEngine):
-    def start_engine(self, context: Any, is_async: bool) -> Awaitable | None:
+class AsyncEngine(BaseEngine):
+    def start_engine(
+        self, initial_state: State, context: Any, is_async: bool
+    ) -> Awaitable | None:
         if self._running:
             return
 
-        self._start_worker()
+        self._state = initial_state
         self._context = context
+        self._start_worker()
 
         return self.event_trigger(event=None, payload=None, is_async=is_async)
 
@@ -184,7 +187,7 @@ class AsyncEngine[S: Enum, E: Enum](BaseEngine):
         self._runtime.submit(coro=coro).result()
 
     def event_trigger(
-        self, event: E | None, payload: object | None, is_async: bool
+        self, event: Enum | None, payload: Any | None, is_async: bool
     ) -> Awaitable | None:
         coro = self.processing_loop(event=event, payload=payload)
 
@@ -194,9 +197,10 @@ class AsyncEngine[S: Enum, E: Enum](BaseEngine):
         return self._runtime.submit(coro=self._queue_task(coro)).result()
 
     async def processing_loop(
-        self, event: E | None, payload: object | None = None
+        self, event: Enum | None, payload: Any | None = None
     ) -> None:
-        source_state: S = self._state
+        # source_state = self._config.states.get(self._state)
+        source_state: State = self._state
 
         # if event is None:
         #     info: I = AuditRecord(
@@ -218,7 +222,7 @@ class AsyncEngine[S: Enum, E: Enum](BaseEngine):
                 )
                 info = AuditRecord(
                     machine_event=machine_event.name,
-                    source=source_state.name,
+                    source=source_state.state,
                     # target=source_state.name,
                     trigger_event="None" if event is None else event.name,
                     success=False,
@@ -226,34 +230,38 @@ class AsyncEngine[S: Enum, E: Enum](BaseEngine):
                 )
                 token = active_audit_record.set(info)
 
-                target_state, actions = await self.evaluate_guards(
+                transition = await self.evaluate_guards(
                     transitions=transitions, info=info
                 )
 
-                if isinstance(target_state, CallbackSpec):
-                    result = target_state.callback(self._context, info)
-                    target_state = await result if target_state.is_async else result
-                    for state in self._config.states:
-                        if state.name == target_state:
-                            target_state = state
-                            info.target = target_state.name
-                            break
+                if transition is None:
+                    break
+
+                target_state = self._config.states.get(transition.target)
+
+                if transition.target is None and transition.router:
+                    result = invoke_callback(transition.router, self._context, info)
+                    new_state = await result if transition.router.is_async else result
+                    target_state = self._config.states.get(new_state)
 
                 if target_state is None:
                     break
 
-                # info.target = target_state.name
+                info.target = target_state.state
+
                 await self.evaluate_on_exit(state=source_state, info=info)
-                await self.evaluate_transition_action(actions=actions, info=info)
+                await self.evaluate_transition_action(
+                    actions=transition.actions, info=info
+                )
 
                 self.apply_state_mutation(state=target_state)
-                # info.target = target_state.name
+                # info.target = target_state
                 info.success = True
 
                 await self.evaluate_on_entry(state=target_state, info=info)
-                await self.evaluate_on_transition(
-                    source=source_state, target=target_state, info=info
-                )
+                # await self.evaluate_on_transition(
+                #     source=source_state, target=target_state, info=info
+                # )
 
                 active_audit_record.reset(token)
                 self._dispatcher.emit(info)
@@ -265,7 +273,7 @@ class AsyncEngine[S: Enum, E: Enum](BaseEngine):
             transitions = self.resolve_transitions(state=source_state, event=event)
             transition_depth += 1
 
-    def apply_state_mutation(self, state: S) -> None:
+    def apply_state_mutation(self, state: State) -> None:
         self._state = state
         self._dispatcher.log_micro_step(
             MicroStep(micro_step=EngineStep.STATE_CHANGE.name, result=True)
@@ -273,39 +281,38 @@ class AsyncEngine[S: Enum, E: Enum](BaseEngine):
 
     async def evaluate_guards(
         self,
-        transitions: list[Transition[S]],
+        transitions: list[Transition],
         info: Any,
-    ) -> tuple[S | Callable | None, tuple[Callable] | None]:
+    ) -> Transition | None:
 
-        for target_state, actions, guards in transitions:
+        for transition in transitions:
+            guards = transition.guards
             if not guards or await self.execute_guards(guards=guards, info=info):
-                return (target_state, actions)
+                return transition
 
-        return (None, None)
-
-    async def evaluate_on_entry(self, state: S, info: Any) -> None:
+    async def evaluate_on_entry(self, state: State, info: Any) -> None:
         await self.execute_actions(
             info=info,
-            actions=self._config.on_entry.get(state),
+            actions=state.on_entry,
             action_type=EngineStep.ON_ENTRY,
         )
 
-    async def evaluate_on_exit(self, state: S, info: Any) -> None:
+    async def evaluate_on_exit(self, state: State, info: Any) -> None:
         await self.execute_actions(
             info=info,
-            actions=self._config.on_exit.get(state),
+            actions=state.on_exit,
             action_type=EngineStep.ON_EXIT,
         )
 
-    async def evaluate_on_transition(self, source: S, target: S, info: Any) -> None:
-        await self.execute_actions(
-            info=info,
-            actions=self._config.on_transition.get((source, target)),
-            action_type=EngineStep.ON_TRANSITION,
-        )
+    # async def evaluate_on_transition(self, source: S, target: S, info: Any) -> None:
+    #     await self.execute_actions(
+    #         info=info,
+    #         actions=self._config.on_transition.get((source, target)),
+    #         action_type=EngineStep.ON_TRANSITION,
+    #     )
 
     async def evaluate_transition_action(
-        self, actions: tuple[Callable] | None, info: Any
+        self, actions: list[CallbackSpec | None], info: Any
     ) -> None:
         await self.execute_actions(
             info=info,
@@ -313,14 +320,19 @@ class AsyncEngine[S: Enum, E: Enum](BaseEngine):
             action_type=EngineStep.TRANSITION_ACTION,
         )
 
-    async def execute_guards(self, guards: tuple[Callable], info: Any) -> bool:
+    async def execute_guards(
+        self, guards: Iterable[CallbackSpec | None], info: Any
+    ) -> bool:
         for guard in guards:
+            if guard is None:
+                continue
+
             microstep = MicroStep(
-                micro_step=EngineStep.GUARD_EVALUATE.name, target=self._state.name
+                micro_step=EngineStep.GUARD_EVALUATE.name, target=self._state.state.name
             )
             try:
-                result = guard(self._context, info)
-                passed = await result if isawaitable(result) else result
+                result = invoke_callback(guard, self._context, info)
+                passed = await result if guard.is_async else result
                 microstep.result = passed
             except Exception as e:
                 microstep.micro_step = EngineEvent.EXCEPTION.name
@@ -336,16 +348,21 @@ class AsyncEngine[S: Enum, E: Enum](BaseEngine):
     async def execute_actions(
         self,
         info: Any,
-        actions: Iterable[Callable] | None,
+        actions: Iterable[CallbackSpec | None],
         action_type: EngineStep,
     ) -> None:
         if not actions:
             return
 
         for action in actions:
-            microstep = MicroStep(micro_step=action_type.name, target=action.__name__)
+            if action is None:
+                continue
+
+            microstep = MicroStep(
+                micro_step=action_type.name, target=action.callback.__name__
+            )
             try:
-                result = action(self._context, info)
+                result = invoke_callback(action, self._context, info)
                 result = await result if isawaitable(result) else result
                 microstep.result = result
             except Exception as e:
@@ -355,9 +372,9 @@ class AsyncEngine[S: Enum, E: Enum](BaseEngine):
                 self._dispatcher.log_micro_step(microstep)
 
     def resolve_transitions(
-        self, state: S, event: E | None
-    ) -> list[Transition[S]] | None:
-        return self._config.transitions.get((state, event))
+        self, state: State, event: Enum | None
+    ) -> list[Transition] | None:
+        return self._config.transitions.get((state.state, event))
 
     # async def execute_validators(self) -> None:
     #     event_record = self.sm._dispatch_event(
