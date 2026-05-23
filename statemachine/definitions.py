@@ -1,40 +1,61 @@
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any
+from typing import Any, Iterable
 
+from .callbacks import CallbackSpec
 from .exceptions import InvalidState, TransitionMapError
 
-type Action2[CTX, PAY] = Callable[[CTX, PAY], Awaitable[None] | None]
-type Action[C] = Callable[[C], Awaitable[None] | None]
-type Guard[C] = Callable[[C], Awaitable[bool] | bool]
-type EntryExitAction[S, C] = dict[S, list[Action[C]]]
-type TransitionAction[S, C] = dict[tuple[S, S], list[Action[C]]]
-type Transition[S, C] = tuple[S, tuple[Action[C]] | None, tuple[Guard[C]] | None]
-type TransitionMap[S, E, C] = dict[tuple[S, E | None], list[Transition[S, C]]]
+type Callbacks = Iterable[Callable] | Callable | None
+type EntryExitAction[S] = dict[S, list[State]]
+type TransitionAction[S] = dict[tuple[S, S], list[CallbackSpec]]
+type TransitionMap[S, E] = dict[tuple[S, E | None], list[Transition]]
 
-type State = Enum
-type Event = Enum
+# type TransitionMap[S, E, C, I] = dict[tuple[S, E | None], list[Transition[S, C, I]]]
+# type Action[C, I] = Callable[[C, I], Awaitable[None] | None]
+# type Guard[C, I] = Callable[[C, I], Awaitable[bool] | bool]
+# type EntryExitAction[S, C, I] = dict[S, list[Action[C, I]]]
+# type TransitionAction[S, C, I] = dict[tuple[S, S], list[Action[C, I]]]
+# type Transition[S, C, I] = tuple[
+#     S, tuple[Action[C, I]] | None, tuple[Guard[C, I]] | None
+# ]
+# type TransitionMap[S, E, C, I] = dict[tuple[S, E | None], list[Transition[S, C, I]]]
+
+
+@dataclass(slots=True)
+class State[S: Enum]:
+    state: S
+    on_exit: list[CallbackSpec | None]
+    on_entry: list[CallbackSpec | None]
+
+
+@dataclass(slots=True)
+class Transition[S: Enum, E: Enum]:
+    source: S
+    target: S | None
+    event: E | None
+    actions: list[CallbackSpec | None]
+    guards: list[CallbackSpec | None]
 
 
 # TODO: Maybe use a dedicated Transition object rather than a generic
 @dataclass(slots=True, frozen=True)
-class TransitionObject:
-    source: State
-    target: State
-    event: Event | None
-    guards: tuple[Guard] | None = None
-    actions: tuple[Action] | None = None
+class TransitionInfo[S: Enum, E: Enum]:
+    source: S
+    target: S
+    event: E | None
+    guards: tuple[Callable] | None = None
+    actions: tuple[Callable] | None = None
 
 
 # TODO: Context that is passed to user-defined callbacks
 @dataclass(slots=True, frozen=True)
-class MachineContext:
-    source: State
-    target: State
-    event: Event
+class MachineContext[S: Enum, E: Enum]:
+    source: S
+    target: S
+    event: E
     payload: Any
-    machine: Any  # reference to SM instance
+    machine_instance: Any
 
 
 class EngineEvent(Enum):
@@ -60,15 +81,15 @@ class EngineStep(Enum):
 
 
 @dataclass(frozen=True)
-class StateMachineConfig[S: Enum, E: Enum, C]:
+class StateMachineConfig[S: Enum, E: Enum]:
     name: str
     initial_state: S
     events: set[E]
     states: set[S]
-    on_entry: EntryExitAction[S, C]
-    on_exit: EntryExitAction[S, C]
-    on_transition: TransitionAction[S, C]
-    transitions: TransitionMap[S, E, C]
+    on_entry: EntryExitAction[S]
+    on_exit: EntryExitAction[S]
+    on_transition: TransitionAction[S]
+    transitions: TransitionMap[S, E]
     verbose: bool
 
     def __post_init__(self) -> None:
@@ -81,12 +102,12 @@ class StateMachineConfig[S: Enum, E: Enum, C]:
 
         state_type = type(initial_state)
         for state in self.states:
-            if not isinstance(state, Enum):
+            if not isinstance(state, (Enum, Callable, type(None))):
                 raise TypeError(
                     f"State '{state}' must be an Enum, not {type(state).__name__}."
                 )
 
-            if not isinstance(state, state_type):
+            if not isinstance(state, (state_type, Callable, type(None))):
                 raise TypeError(
                     f"Inconsistent Enum class: '{state}' is a {type(state).__name__}, "
                     f"but the machine expects {state_type.__name__}."
