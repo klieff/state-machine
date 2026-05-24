@@ -15,7 +15,7 @@ from .dispatcher import active_audit_record
 from .exceptions import ActionError, GuardError
 
 if TYPE_CHECKING:
-    from .definitions import StateMachineConfig, Transition, State
+    from .definitions import StateMachineConfig, Transition, State, StateSpec, EventSpec
     from .dispatcher import EventDispatcher
 
 
@@ -80,14 +80,14 @@ class EngineRuntime:
 
 # TODO: Implement a drain queue instead of a permanent queue per instance
 class BaseEngine:
-    _state: State
+    _state: StateSpec
     _runtime: EngineRuntime = EngineRuntime()
 
     def __init__(
         self,
         config: StateMachineConfig,
         dispatcher: EventDispatcher,
-        transition_depth: int = 10,
+        transition_depth: int = 100,
     ):
         self._config = config
         self._dispatcher = dispatcher
@@ -105,7 +105,7 @@ class BaseEngine:
 
         record = AuditRecord(
             machine_event=EngineEvent.MACHINE_START.name,
-            source=self._state.state,
+            source=self._state,
             trigger_event="None",
             success=self._running,
             timeline=[MicroStep()],
@@ -121,7 +121,7 @@ class BaseEngine:
 
             record = AuditRecord(
                 machine_event=EngineEvent.MACHINE_STOP.name,
-                source=self._state.state,
+                source=self._state,
                 trigger_event="None",
                 success=True,
                 timeline=[MicroStep()],
@@ -148,28 +148,28 @@ class BaseEngine:
             finally:
                 self._queue.task_done()
 
-    async def _get_state(self) -> State:
+    async def _get_state(self) -> StateSpec:
         self._runtime.assert_runtime_thread()
         return self._state
 
-    def _dispatch_internal_event(self, machine_event: EngineEvent) -> None:
-        record = AuditRecord(machine_event=machine_event.name, source=self._state.state)
-
-        token = active_audit_record.set(record)
-        active_audit_record.reset(token)
-        self._dispatcher.emit(record=record)
+    # def _dispatch_internal_event(self, machine_event: EngineEvent) -> None:
+    #     record = AuditRecord(machine_event=machine_event.name, source=self._state.state)
+    #
+    #     token = active_audit_record.set(record)
+    #     active_audit_record.reset(token)
+    #     self._dispatcher.emit(record=record)
 
 
 # TODO: Implement a dedicated error handler
 class AsyncEngine(BaseEngine):
     def start_engine(
-        self, initial_state: State, context: Any, is_async: bool
+        self, initial_state: StateSpec, context: Any, is_async: bool
     ) -> Awaitable | None:
         if self._running:
             return
 
-        self._state = initial_state
         self._context = context
+        self._state = initial_state  # self._config.states.get(initial_state)
         self._start_worker()
 
         return self.event_trigger(event=None, payload=None, is_async=is_async)
@@ -185,7 +185,7 @@ class AsyncEngine(BaseEngine):
         self._runtime.submit(coro=coro).result()
 
     def event_trigger(
-        self, event: Enum | None, payload: Any | None, is_async: bool
+        self, event: EventSpec | None, payload: Any, is_async: bool
     ) -> Awaitable | None:
         coro = self.processing_loop(event=event, payload=payload)
 
@@ -195,18 +195,16 @@ class AsyncEngine(BaseEngine):
         self._runtime.submit(coro=self._queue_task(coro)).result()
 
     async def processing_loop(
-        self, event: Enum | None, payload: Any | None = None
+        self, event: EventSpec | None, payload: Any | None = None
     ) -> None:
-        source_state: State = self._state
-        transitions = self.resolve_transitions(state=source_state, event=event)
+        transitions = self.resolve_transitions(state=self._state, event=event)
 
         machine_event = (
             EngineEvent.EVENT_TRIGGER if event else EngineEvent.NULL_TRANSITION
         )
         info = AuditRecord(
             machine_event=machine_event.name,
-            source=source_state.state,
-            trigger_event="None" if event is None else event.name,
+            trigger_event=event,
             success=False,
             payload=payload,
         )
@@ -219,6 +217,8 @@ class AsyncEngine(BaseEngine):
         try:
             transition_depth = 0
             while transitions and transition_depth < self._transition_depth:
+                info.source = self._config.states[self._state].state
+
                 transition = await self.evaluate_guards(
                     transitions=transitions, info=info
                 )
@@ -226,19 +226,26 @@ class AsyncEngine(BaseEngine):
                 if transition is None:
                     break
 
-                target_state = self._config.states.get(transition.target)
+                target_state = transition.target
 
                 if transition.router and transition.target is None:
                     result = invoke_callback(transition.router, self._context, info)
-                    router_state = (
+                    router_state: Any = (
                         await result if transition.router.is_async else result
                     )
-                    target_state = self._config.states.get(router_state)
+                    router_state_name = (
+                        router_state.name
+                        if isinstance(router_state, Enum)
+                        else str(router_state)
+                    )
+                    if self._config.states.get(router_state_name):
+                        target_state = router_state_name
 
                 if target_state is None:
                     break
 
-                info.target = target_state.state
+                source_state = self._config.states[self._state]
+                info.target = self._config.states[target_state].state
 
                 if source_state.on_exit:
                     await self.evaluate_on_exit(state=source_state, info=info)
@@ -249,6 +256,8 @@ class AsyncEngine(BaseEngine):
                     )
 
                 self.apply_state_mutation(state=target_state)
+
+                target_state = self._config.states[target_state]
                 info.success = True
 
                 if target_state.on_entry:
@@ -258,17 +267,19 @@ class AsyncEngine(BaseEngine):
                 #     source=source_state, target=target_state, info=info
                 # )
 
-                active_audit_record.reset(token)
-                self._dispatcher.emit(info)
+                if target_state.final_state:
+                    break
 
                 event = None
-                source_state = target_state
-                transitions = self.resolve_transitions(state=source_state, event=event)
+                transitions = self.resolve_transitions(state=self._state, event=event)
                 transition_depth += 1
         except Exception as e:
             raise RuntimeError("BIGLY error") from e
+        finally:
+            active_audit_record.reset(token)
+            self._dispatcher.emit(info)
 
-    def apply_state_mutation(self, state: State) -> None:
+    def apply_state_mutation(self, state: StateSpec) -> None:
         self._state = state
         self._dispatcher.log_micro_step(
             MicroStep(micro_step=EngineStep.STATE_CHANGE.name, result=True)
@@ -323,7 +334,7 @@ class AsyncEngine(BaseEngine):
                 continue
 
             microstep = MicroStep(
-                micro_step=EngineStep.GUARD_EVALUATE.name, target=self._state.state.name
+                micro_step=EngineStep.GUARD_EVALUATE.name, target=str(self._state)
             )
             try:
                 result = invoke_callback(guard, self._context, info)
@@ -367,9 +378,9 @@ class AsyncEngine(BaseEngine):
                 self._dispatcher.log_micro_step(microstep)
 
     def resolve_transitions(
-        self, state: State, event: Enum | None
+        self, state: StateSpec, event: EventSpec | None
     ) -> list[Transition] | None:
-        return self._config.transitions.get((state.state, event))
+        return self._config.transitions.get((state, event))
 
     # async def execute_validators(self) -> None:
     #     event_record = self.sm._dispatch_event(

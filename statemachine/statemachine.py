@@ -7,100 +7,140 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from .audit import AuditRecord
 from .callbacks import prepare_callbacks
-from .definitions import EngineEvent, EngineStep, StateMachineConfig, State, Transition
+from .definitions import (
+    EngineEvent,
+    EngineStep,
+    EventSpec,
+    StateMachineConfig,
+    State,
+    StateSpec,
+    Transition,
+)
 from .dispatcher import EventDispatcher
 from .engine import AsyncEngine
-from .exceptions import InvalidState, UninitializedError
+from .exceptions import InvalidState, UninitializedError, InvalidEvent
 
 if TYPE_CHECKING:
     from .definitions import (
         Callbacks,
-        StateMachineConfig,
         TransitionAction,
         TransitionMap,
     )
 
+type StateId = str | Enum
 
-class StateMachineBuilder[S: Enum, E: Enum]:
+
+def _normalize_state_event(state: StateId) -> str:
+    if isinstance(state, Enum):
+        return state.name
+    return str(state)
+
+
+class StateMachineBuilder:
     _counter: ClassVar = itertools.count(start=1)
 
     def __init__(self) -> None:
-        self._id = id(self)
         self._name = f"SM_{next(StateMachineBuilder._counter)}"
-        self._events: set[E] = set()
-        self._states: dict[S, State] = dict()
-        self._transitions: TransitionMap[S, E] = dict()
-        self._on_transition: TransitionAction[S] = dict()
+        self._id = id(self)
+        self._events: dict[EventSpec, EventSpec] = dict()
+        self._states: dict[StateSpec, State] = dict()
+        self._transitions: TransitionMap = dict()
+        self._on_transition: TransitionAction[StateSpec] = dict()
         self._audit_sink: Callable | None = None
         self._is_async = False
 
-    def add_audit_sink(self, audit_sink: Callable) -> StateMachineBuilder[S, E]:
+    def add_audit_sink(self, audit_sink: Callable) -> StateMachineBuilder:
         if callable(audit_sink):
             self._audit_sink = audit_sink
         return self
 
+    def add_choice_state(
+        self,
+        state: StateSpec,
+        router: Callable[..., StateSpec],
+        on_entry: Callbacks | None = None,
+        on_exit: Callbacks | None = None,
+        actions: Callbacks | None = None,
+        guards: Callbacks | None = None,
+    ) -> StateMachineBuilder:
+        source = _normalize_state_event(state)
+        choice_transition = Transition(
+            source=source,
+            event=None,
+            target=None,
+            router=prepare_callbacks(router).pop(),
+            actions=prepare_callbacks(actions),
+            guards=prepare_callbacks(guards),
+        )
+
+        self.add_state(state=state, on_entry=on_entry, on_exit=on_exit)
+        self._transitions.setdefault((source, None), []).append(choice_transition)
+        return self
+
     def add_state(
-        self, state: S, on_entry: Callbacks = None, on_exit: Callbacks = None
-    ) -> StateMachineBuilder[S, E]:
-        new_state = State(
+        self,
+        state: StateSpec,
+        on_entry: Callbacks | None = None,
+        on_exit: Callbacks | None = None,
+        is_final_state: bool = False,
+    ) -> StateMachineBuilder:
+        state_name: StateSpec = _normalize_state_event(state)
+        self._states[state_name] = State(
             state=state,
             on_exit=prepare_callbacks(on_exit),
             on_entry=prepare_callbacks(on_entry),
+            final_state=is_final_state,
         )
-        self._states[state] = new_state
         return self
 
     # TODO: Guard against infinite loops, e.g., add_transition(State_X, None, State_X)
     def add_transition(
         self,
-        source: S,
-        event: E | None = None,
-        target: S | None = None,
-        actions: Callbacks = None,
-        guards: Callbacks = None,
-        router: Callbacks = None,
-    ) -> StateMachineBuilder[S, E]:
-        if event is not None:
-            self._events.add(event)
+        source: StateSpec,
+        event: EventSpec,
+        target: StateSpec,
+        actions: Callbacks | None = None,
+        guards: Callbacks | None = None,
+    ) -> StateMachineBuilder:
+        source_name = _normalize_state_event(source)
+        event_name = _normalize_state_event(event)
 
-        self._transitions.setdefault((source, event), []).append(
+        self._events[event_name] = event
+        self._transitions.setdefault((source_name, event_name), []).append(
             Transition(
-                source=source,
-                target=target,
-                event=event,
+                source=source_name,
+                target=_normalize_state_event(target),
+                event=event_name,
                 actions=prepare_callbacks(actions),
                 guards=prepare_callbacks(guards),
-                router=prepare_callbacks(router).pop(),
             )
         )
         return self
 
-    def on_transition(
-        self, source: S, target: S, actions: Callbacks
-    ) -> StateMachineBuilder[S, E]:
-        self._on_transition.setdefault((source, target), []).extend(
-            prepare_callbacks(actions)
-        )
-        return self
+    # def on_transition(
+    #     self, source: S, target: S, actions: Callbacks
+    # ) -> StateMachineBuilder[S, E]:
+    #     self._on_transition.setdefault((source, target), []).extend(
+    #         prepare_callbacks(actions)
+    #     )
+    #     return self
 
-    def build(
-        self, name: str | None = None, verbose: bool = False
-    ) -> StateMachine[S, E]:
-        config = StateMachineConfig[S, E](
+    def build(self, name: str | None = None, verbose: bool = False) -> StateMachine:
+        config = StateMachineConfig(
             name=name or self._name,
             events=self._events,
             states=self._states,
             transitions=self._transitions,
-            on_transition=self._on_transition,
+            # on_transition=self._on_transition,
             verbose=verbose,
         )
-        return StateMachine[S, E](
+        return StateMachine(
             config=config, audit_sink=self._audit_sink, is_async=self._is_async
         )
 
     def build_async(
         self, name: str | None = None, verbose: bool = False
-    ) -> StateMachine[S, E]:
+    ) -> StateMachine:
         self._is_async = True
         return self.build(name=name, verbose=verbose)
 
@@ -132,10 +172,10 @@ def audit_sink_callback(record: AuditRecord) -> None:
         print(f"{line}{detail_str}")
 
 
-class StateMachine[S: Enum, E: Enum]:
+class StateMachine:
     def __init__(
         self,
-        config: StateMachineConfig[S, E],
+        config: StateMachineConfig,
         audit_sink: Callable | None = None,
         is_async: bool = False,
     ) -> None:
@@ -146,15 +186,15 @@ class StateMachine[S: Enum, E: Enum]:
         self._is_async = is_async
         self._running = False
         self._engine = AsyncEngine(
-            config=config, dispatcher=dispatcher, transition_depth=10
+            config=config, dispatcher=dispatcher, transition_depth=100
         )
 
-    def start(self, initial_state: S, context: Any) -> Awaitable | None:
+    def start(self, initial_state: StateSpec, context: Any) -> Awaitable | None:
         if self._running:
             return
 
-        state = self._config.states.get(initial_state)
-        if state is None:
+        state = _normalize_state_event(initial_state)
+        if self._config.states.get(state) is None:
             raise InvalidState
 
         self._running = True
@@ -166,14 +206,20 @@ class StateMachine[S: Enum, E: Enum]:
         self._running = False
         return self._engine.stop_engine(is_async=self._is_async, force=force)
 
-    def trigger(self, event: E, payload: object | None = None) -> Awaitable | None:
+    def trigger(self, event: EventSpec, payload: Any = None) -> Awaitable | None:
         if not self._running:
             raise UninitializedError(machine_name=self._config.name)
 
+        event_name = _normalize_state_event(event)
+        if self._config.events.get(event_name) is None:
+            raise InvalidEvent
+
         return self._engine.event_trigger(
-            event=event, payload=payload, is_async=self._is_async
+            event=event_name,
+            payload=payload,
+            is_async=self._is_async,
         )
 
     # FIX: Define a dedicated state getter in engine class def
-    def get_state(self) -> Enum:
-        return self._engine._state.state
+    def get_state(self) -> StateSpec:
+        return self._engine._state

@@ -61,6 +61,9 @@ Execute Automatic Transitions
 
 ### Builder methods
 
+The `StateMachineBuilder` class is the centralized configuration interface for the
+state machine.
+
 * `.add_audit_sink(audit_callable)`: attach a user-defined audit listener
 * `.add_transition(...)`: defines transition topology
   * Event-driven transitions: `.add_transition(source, event, target, action, guard)`

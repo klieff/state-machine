@@ -30,6 +30,10 @@ class GuardError(StateMachineException):
     msg = "Critical failure in guard '{guard}' (State: {source} Event: {event})"
 
 
+class InvalidEvent(StateMachineException):
+    msg = "Event is not registered"
+
+
 class InvalidState(StateMachineException):
     msg = "No transition map found for initial state '{initial_state}'"
 

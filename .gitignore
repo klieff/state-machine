@@ -1,6 +1,7 @@
-backup/
 __pycache__/
 .venv/
+backup/
+temp/
 
 project.md
 threadsafe.md

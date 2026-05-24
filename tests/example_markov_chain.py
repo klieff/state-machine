@@ -5,7 +5,9 @@ from typing import Any
 from statemachine import StateMachineBuilder
 
 
-State = Enum("Chain", ("PATROLLING", "CHASING", "RESTING", "SPOTTED", "EATEN"))
+State = Enum(
+    "Chain", ("PATROLLING", "CHASING", "RESTING", "SPOTTED", "EATEN", "SURVIVED")
+)
 Event = Enum("Event", ("TICK"))
 
 
@@ -36,17 +38,20 @@ MARKOV_MATRIX = {
 
 # Context to pass to callables
 class MonsterContext:
-    def __init__(self, name):
+    def __init__(self, name, payload):
         self.name = name
+        self.payload = payload
         self.log = []
 
 
 # Dynamic router function
 def dynamic_router(context: MonsterContext, info) -> Any:
     for target in MARKOV_MATRIX.get(info.source, {}).keys():
-        if evaluate_probability(info.source, target, info.payload):
-            if info.source == State.CHASING and random.random() < 0.50:
+        if evaluate_probability(info.source, target, context.payload()):
+            if info.source == State.CHASING and random.random() < 0.20:
                 target = State.EATEN
+            elif info.source == State.CHASING and random.random() < 0.30:
+                target = State.SURVIVED
             return target
 
 
@@ -63,6 +68,8 @@ def record_movement(context: MonsterContext, info) -> None:
         msg += f"is {info.target.name} the chicken 🐔"
     elif info.target == State.SPOTTED:
         msg += f"{info.target.name} a chicken 🐔"
+    elif info.target == State.SURVIVED:
+        msg = "❤️ Chicken 🐔 SURVIVED!"
     else:
         print("⛔ SHOULD NEVER END UP HERE!")
     context.log.append(msg)
@@ -80,36 +87,62 @@ def evaluate_probability(source, target, payload) -> bool:
 
 # Registering states and transitions based on the matrix
 builder = (
-    StateMachineBuilder[State, Event]()
-    .add_state(State.RESTING)
-    .add_state(State.PATROLLING)
-    .add_state(State.CHASING)
-    .add_state(State.SPOTTED)
-    .add_state(State.EATEN)
-    .add_transition(
-        source=State.RESTING,
-        event=Event.TICK,
+    StateMachineBuilder()
+    .add_choice_state(
+        state=State.RESTING,
         actions=record_movement,
         router=dynamic_router,
     )
-    .add_transition(
-        source=State.PATROLLING,
-        event=Event.TICK,
+    .add_choice_state(
+        state=State.PATROLLING,
         actions=record_movement,
         router=dynamic_router,
     )
-    .add_transition(
-        source=State.SPOTTED,
-        event=Event.TICK,
+    .add_choice_state(
+        state=State.SPOTTED,
         actions=record_movement,
         router=dynamic_router,
     )
-    .add_transition(
-        source=State.CHASING,
-        event=Event.TICK,
+    .add_choice_state(
+        state=State.CHASING,
         actions=record_movement,
         router=dynamic_router,
     )
+    # .add_choice_state(
+    #     state=State.EATEN,
+    #     actions=record_movement,
+    #     router=dynamic_router,
+    # )
+    # .add_state(State.RESTING)
+    # .add_state(State.PATROLLING)
+    # .add_state(State.CHASING)
+    # .add_state(State.SPOTTED)
+    .add_state(State.SURVIVED, is_final_state=True)
+    .add_state(State.EATEN, is_final_state=True)
+    # .add_transition(
+    #     source=State.RESTING,
+    #     event=Event.TICK,
+    #     actions=record_movement,
+    #     router=dynamic_router,
+    # )
+    # .add_transition(
+    #     source=State.PATROLLING,
+    #     event=Event.TICK,
+    #     actions=record_movement,
+    #     router=dynamic_router,
+    # )
+    # .add_transition(
+    #     source=State.SPOTTED,
+    #     event=Event.TICK,
+    #     actions=record_movement,
+    #     router=dynamic_router,
+    # )
+    # .add_transition(
+    #     source=State.CHASING,
+    #     event=Event.TICK,
+    #     actions=record_movement,
+    #     router=dynamic_router,
+    # )
     # .add_transition(
     #     source=State.EATEN,
     #     event=None,
@@ -122,16 +155,18 @@ builder = (
 engine = builder.build()
 
 # Initialize a dedicated context instance
-monster_ctx = MonsterContext(name="Goblin")
+monster_ctx = MonsterContext(name="Goblin", payload=random.random)
 engine.start(initial_state=State.RESTING, context=monster_ctx)
+engine.stop()
+exit()
 
 # Simulate clock cycles on the event loop
 num_cycles = 25
 for i in range(num_cycles):
     payload = random.random()
-    engine.trigger(Event.TICK, payload=payload)
+    engine.trigger(None, payload=payload)
+    # engine.trigger(Event.TICK, payload=payload)
 
-    # print(engine.get_state())
     if engine.get_state() == State.EATEN:
         break
     elif i == num_cycles - 1:

@@ -6,10 +6,13 @@ from typing import Any, Iterable
 from .callbacks import CallbackSpec
 from .exceptions import InvalidState, TransitionMapError
 
-type Callbacks = Iterable[Callable] | Callable | None
+type EventSpec = Enum | str
+type StateSpec = Enum | str
+type RouterSpec = CallbackSpec
+type Callbacks = Iterable[Callable] | Callable
 type EntryExitAction[S] = dict[S, list[State]]
 type TransitionAction[S] = dict[tuple[S, S], list[CallbackSpec]]
-type TransitionMap[S, E] = dict[tuple[S, E | None], list[Transition]]
+type TransitionMap = dict[tuple[StateSpec, EventSpec | None], list[Transition]]
 
 # type TransitionMap[S, E, C, I] = dict[tuple[S, E | None], list[Transition[S, C, I]]]
 # type Action[C, I] = Callable[[C, I], Awaitable[None] | None]
@@ -20,33 +23,6 @@ type TransitionMap[S, E] = dict[tuple[S, E | None], list[Transition]]
 #     S, tuple[Action[C, I]] | None, tuple[Guard[C, I]] | None
 # ]
 # type TransitionMap[S, E, C, I] = dict[tuple[S, E | None], list[Transition[S, C, I]]]
-
-
-@dataclass(slots=True)
-class State:
-    state: Enum
-    on_exit: list[CallbackSpec | None]
-    on_entry: list[CallbackSpec | None]
-
-
-@dataclass(slots=True)
-class Transition:
-    source: Enum
-    target: Enum | None
-    event: Enum | None
-    actions: list[CallbackSpec | None]
-    guards: list[CallbackSpec | None]
-    router: CallbackSpec | None
-
-
-# TODO: Context that is passed to user-defined callbacks
-@dataclass(slots=True, frozen=True)
-class MachineContext[S: Enum, E: Enum]:
-    source: S
-    target: S
-    event: E
-    payload: Any
-    machine_instance: Any
 
 
 class EngineEvent(Enum):
@@ -71,13 +47,41 @@ class EngineStep(Enum):
     TRANSITION_ACTION = auto()
 
 
+@dataclass(slots=True)
+class State:
+    state: StateSpec
+    on_exit: list[CallbackSpec | None]
+    on_entry: list[CallbackSpec | None]
+    final_state: bool = False
+
+
+@dataclass(slots=True)
+class Transition:
+    source: StateSpec
+    event: EventSpec | None
+    target: StateSpec | None
+    actions: list[CallbackSpec | None]
+    guards: list[CallbackSpec | None]
+    router: RouterSpec | None = None
+
+
+# TODO: Context that is passed to user-defined callbacks
+@dataclass(slots=True, frozen=True)
+class MachineContext[S: Enum, E: Enum]:
+    source: S
+    target: S
+    event: E
+    payload: Any
+    machine_instance: Any
+
+
 @dataclass(frozen=True)
-class StateMachineConfig[S: Enum, E: Enum]:
+class StateMachineConfig:
     name: str
-    events: set[E]
-    states: dict[S, State]
-    transitions: TransitionMap[S, E]
-    on_transition: TransitionAction[S]
+    events: dict[EventSpec, EventSpec]
+    states: dict[StateSpec, State]
+    transitions: TransitionMap
+    # on_transition: TransitionAction
     verbose: bool
 
     def __post_init__(self) -> None:
@@ -85,13 +89,13 @@ class StateMachineConfig[S: Enum, E: Enum]:
             raise TransitionMapError(machine_name=self.name)
 
         for state in self.states.keys():
-            if not isinstance(state, Enum):
+            if not isinstance(state, (Enum, str)):
                 raise TypeError(
                     f"State '{state}' must be an Enum, not {type(state).__name__}."
                 )
 
         for event in self.events:
-            if not isinstance(event, Enum) and event is not None:
+            if not isinstance(event, (Enum, str)) and event is not None:
                 raise TypeError(
                     f"Event '{event}' must be an Enum, not {type(event).__name__}."
                 )

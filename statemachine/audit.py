@@ -2,7 +2,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from enum import Enum
+
+from .definitions import StateSpec, EventSpec
 
 
 @dataclass(slots=True)
@@ -16,10 +17,10 @@ class MicroStep:
 @dataclass(slots=True)
 class AuditRecord:
     machine_event: str = ""
-    source: Enum | str = ""
-    target: Enum | str = ""
-    trigger_event: str = ""
-    payload: object | None = None
+    source: StateSpec = ""
+    target: StateSpec = ""
+    trigger_event: EventSpec | None = None
+    payload: Any | None = None
     success: bool = True
     timeline: list[MicroStep] = field(default_factory=list)
 
