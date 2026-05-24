@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from .audit import AuditRecord, MicroStep
 from .callbacks import CallbackSpec, invoke_callback
-from .definitions import EngineEvent, EngineStep
+from .definitions import EngineEvent, EngineStep, RouterSpec
 from .dispatcher import active_audit_record
 from .exceptions import ActionError, GuardError
 
@@ -197,8 +197,6 @@ class AsyncEngine(BaseEngine):
     async def processing_loop(
         self, event: EventSpec | None, payload: Any | None = None
     ) -> None:
-        transitions = self.resolve_transitions(state=self._state, event=event)
-
         machine_event = (
             EngineEvent.EVENT_TRIGGER if event else EngineEvent.NULL_TRANSITION
         )
@@ -216,36 +214,34 @@ class AsyncEngine(BaseEngine):
         #       exists or if MAX_TRANSITION_DEPTH has been exceeded.
         try:
             transition_depth = 0
-            while transitions and transition_depth < self._transition_depth:
-                info.source = self._config.states[self._state].state
+            while transition_depth < self._transition_depth and self._running:
+                source_state = self._config.states[self._state]
+                info.source = source_state.state
+
+                transitions = self.resolve_transitions(state=self._state, event=event)
+
+                if transitions is None:
+                    break  # Break if transition map is empty
 
                 transition = await self.evaluate_guards(
                     transitions=transitions, info=info
                 )
 
                 if transition is None:
-                    break
+                    break  # Break if no valid transition is found
 
-                target_state = transition.target
+                target = transition.target
 
-                if transition.router and transition.target is None:
-                    result = invoke_callback(transition.router, self._context, info)
-                    router_state: Any = (
-                        await result if transition.router.is_async else result
+                if transition.router:
+                    target = await self.execute_choice_transition(
+                        router=transition.router, info=info
                     )
-                    router_state_name = (
-                        router_state.name
-                        if isinstance(router_state, Enum)
-                        else str(router_state)
-                    )
-                    if self._config.states.get(router_state_name):
-                        target_state = router_state_name
 
-                if target_state is None:
-                    break
+                if target is None:
+                    break  # Break if dynamic router returns an invalid state
 
-                source_state = self._config.states[self._state]
-                info.target = self._config.states[target_state].state
+                target_state = self._config.states[target]
+                info.target = target_state.state
 
                 if source_state.on_exit:
                     await self.evaluate_on_exit(state=source_state, info=info)
@@ -255,26 +251,19 @@ class AsyncEngine(BaseEngine):
                         actions=transition.actions, info=info
                     )
 
-                self.apply_state_mutation(state=target_state)
-
-                target_state = self._config.states[target_state]
+                self.apply_state_mutation(state=target)
                 info.success = True
 
                 if target_state.on_entry:
                     await self.evaluate_on_entry(state=target_state, info=info)
 
-                # await self.evaluate_on_transition(
-                #     source=source_state, target=target_state, info=info
-                # )
-
                 if target_state.final_state:
-                    break
+                    break  # Break if target state is a final state
 
                 event = None
-                transitions = self.resolve_transitions(state=self._state, event=event)
                 transition_depth += 1
         except Exception as e:
-            raise RuntimeError("BIGLY error") from e
+            raise RuntimeError("Error in engine processing loop") from e
         finally:
             active_audit_record.reset(token)
             self._dispatcher.emit(info)
@@ -290,7 +279,6 @@ class AsyncEngine(BaseEngine):
         transitions: list[Transition],
         info: Any,
     ) -> Transition | None:
-
         for transition in transitions:
             guards = transition.guards
             if not guards or await self.execute_guards(guards=guards, info=info):
@@ -318,7 +306,7 @@ class AsyncEngine(BaseEngine):
     #     )
 
     async def evaluate_transition_action(
-        self, actions: list[CallbackSpec | None], info: Any
+        self, actions: list[CallbackSpec], info: Any
     ) -> None:
         await self.execute_actions(
             info=info,
@@ -326,13 +314,8 @@ class AsyncEngine(BaseEngine):
             action_type=EngineStep.TRANSITION_ACTION,
         )
 
-    async def execute_guards(
-        self, guards: Iterable[CallbackSpec | None], info: Any
-    ) -> bool:
+    async def execute_guards(self, guards: Iterable[CallbackSpec], info: Any) -> bool:
         for guard in guards:
-            if guard is None:
-                continue
-
             microstep = MicroStep(
                 micro_step=EngineStep.GUARD_EVALUATE.name, target=str(self._state)
             )
@@ -354,16 +337,10 @@ class AsyncEngine(BaseEngine):
     async def execute_actions(
         self,
         info: Any,
-        actions: Iterable[CallbackSpec | None],
+        actions: Iterable[CallbackSpec],
         action_type: EngineStep,
     ) -> None:
-        if not actions:
-            return
-
         for action in actions:
-            if action is None:
-                continue
-
             microstep = MicroStep(
                 micro_step=action_type.name, target=action.callback.__name__
             )
@@ -376,6 +353,17 @@ class AsyncEngine(BaseEngine):
                 raise ActionError from e
             finally:
                 self._dispatcher.log_micro_step(microstep)
+
+    async def execute_choice_transition(
+        self, router: RouterSpec, info: AuditRecord
+    ) -> StateSpec | None:
+        result = invoke_callback(router, self._context, info)
+        router_state = await result if router.is_async else result
+        router_state_name = (
+            router_state.name if isinstance(router_state, Enum) else router_state
+        )
+        if router_state_name in self._config.states:
+            return router_state_name
 
     def resolve_transitions(
         self, state: StateSpec, event: EventSpec | None

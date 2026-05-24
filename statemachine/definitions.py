@@ -4,7 +4,7 @@ from enum import Enum, auto
 from typing import Any, Iterable
 
 from .callbacks import CallbackSpec
-from .exceptions import InvalidState, TransitionMapError
+from .exceptions import TransitionMapError
 
 type EventSpec = Enum | str
 type StateSpec = Enum | str
@@ -13,16 +13,6 @@ type Callbacks = Iterable[Callable] | Callable
 type EntryExitAction[S] = dict[S, list[State]]
 type TransitionAction[S] = dict[tuple[S, S], list[CallbackSpec]]
 type TransitionMap = dict[tuple[StateSpec, EventSpec | None], list[Transition]]
-
-# type TransitionMap[S, E, C, I] = dict[tuple[S, E | None], list[Transition[S, C, I]]]
-# type Action[C, I] = Callable[[C, I], Awaitable[None] | None]
-# type Guard[C, I] = Callable[[C, I], Awaitable[bool] | bool]
-# type EntryExitAction[S, C, I] = dict[S, list[Action[C, I]]]
-# type TransitionAction[S, C, I] = dict[tuple[S, S], list[Action[C, I]]]
-# type Transition[S, C, I] = tuple[
-#     S, tuple[Action[C, I]] | None, tuple[Guard[C, I]] | None
-# ]
-# type TransitionMap[S, E, C, I] = dict[tuple[S, E | None], list[Transition[S, C, I]]]
 
 
 class EngineEvent(Enum):
@@ -49,9 +39,10 @@ class EngineStep(Enum):
 
 @dataclass(slots=True)
 class State:
+    name: str
     state: StateSpec
-    on_exit: list[CallbackSpec | None]
-    on_entry: list[CallbackSpec | None]
+    on_exit: list[CallbackSpec]
+    on_entry: list[CallbackSpec]
     final_state: bool = False
 
 
@@ -60,8 +51,8 @@ class Transition:
     source: StateSpec
     event: EventSpec | None
     target: StateSpec | None
-    actions: list[CallbackSpec | None]
-    guards: list[CallbackSpec | None]
+    actions: list[CallbackSpec]
+    guards: list[CallbackSpec]
     router: RouterSpec | None = None
 
 
@@ -91,14 +82,24 @@ class StateMachineConfig:
         for state in self.states.keys():
             if not isinstance(state, (Enum, str)):
                 raise TypeError(
-                    f"State '{state}' must be an Enum, not {type(state).__name__}."
+                    f"State '{state}' must be an Enum or str, not {type(state).__name__}."
                 )
 
         for event in self.events:
             if not isinstance(event, (Enum, str)) and event is not None:
                 raise TypeError(
-                    f"Event '{event}' must be an Enum, not {type(event).__name__}."
+                    f"Event '{event}' must be an Enum or str, not {type(event).__name__}."
                 )
+
+        for transitions in self.transitions.values():
+            for transition in transitions:
+                source = transition.source
+                target = transition.target
+                if source not in self.states:
+                    raise TypeError(f"Source state '{source}' is not a valid state.")
+
+                if target not in self.states and target is not None:
+                    raise TypeError(f"Target state '{target}' is not a valid state.")
 
 
 # @dataclass(slots=True)

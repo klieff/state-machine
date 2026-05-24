@@ -84,6 +84,7 @@ class StateMachineBuilder:
     ) -> StateMachineBuilder:
         state_name: StateSpec = _normalize_state_event(state)
         self._states[state_name] = State(
+            name=state_name,
             state=state,
             on_exit=prepare_callbacks(on_exit),
             on_entry=prepare_callbacks(on_entry),

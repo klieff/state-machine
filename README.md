@@ -64,12 +64,13 @@ Execute Automatic Transitions
 The `StateMachineBuilder` class is the centralized configuration interface for the
 state machine.
 
-* `.add_audit_sink(audit_callable)`: attach a user-defined audit listener
+* `.add_state(...)` main method for adding states
+* `.add_choice_state(...)` method for adding transient choice states
 * `.add_transition(...)`: defines transition topology
   * Event-driven transitions: `.add_transition(source, event, target, action, guard)`
   * Automatic transitions: `.add_transition(source, None, target, action, guard)`
 * `.on_transition(source, target, action)`: defines global transition observers
-* `.on_exit(source, action)` and `.on_entry(source, action)`: define lifecycle callbacks
+* `.add_audit_sink(audit_callable)`: attach a user-defined audit listener
 
 ### State machine methods
 

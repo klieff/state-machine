@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 from inspect import (
-    ClassFoundException,
     Parameter,
-    isawaitable,
     iscoroutine,
     iscoroutinefunction,
     signature,
@@ -37,11 +35,9 @@ def get_callback_signature(callback: Callable) -> CallbackSpec:
     )
 
 
-def prepare_callbacks(
-    callbacks: Iterable[Callable] | Callable | None,
-) -> list:
+def prepare_callbacks(callbacks: Iterable[Callable] | Callable | None) -> list:
     if callbacks is None:
-        return [None]
+        return []
     elif callable(callbacks):
         return [get_callback_signature(callbacks)]
     return [get_callback_signature(callback) for callback in callbacks]

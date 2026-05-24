@@ -122,8 +122,8 @@ builder = (
     # .add_transition(
     #     source=State.RESTING,
     #     event=Event.TICK,
+    #     target=State.PATROLLING,
     #     actions=record_movement,
-    #     router=dynamic_router,
     # )
     # .add_transition(
     #     source=State.PATROLLING,
