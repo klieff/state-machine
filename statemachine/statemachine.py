@@ -27,13 +27,11 @@ if TYPE_CHECKING:
         TransitionMap,
     )
 
-type StateId = str | Enum
 
-
-def _normalize_state_event(state: StateId) -> str:
-    if isinstance(state, Enum):
-        return state.name
-    return str(state)
+def _normalize_state_event(spec: StateSpec | EventSpec) -> str:
+    if isinstance(spec, Enum):
+        return spec.name
+    return str(spec)
 
 
 class StateMachineBuilder:
