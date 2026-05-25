@@ -10,13 +10,14 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from .audit import AuditRecord, MicroStep
 from .callbacks import CallbackSpec, invoke_callback
-from .definitions import EngineEvent, EngineStep, RouterSpec
+from .definitions import EngineEvent, EngineStep, RouterSpec, TransitionInfo
 from .dispatcher import active_audit_record
 from .exceptions import ActionError, GuardError
 
 if TYPE_CHECKING:
     from .definitions import StateMachineConfig, Transition, State, StateSpec, EventSpec
     from .dispatcher import EventDispatcher
+    from .statemachine import StateMachine
 
 
 @dataclass(slots=True)
@@ -85,12 +86,15 @@ class BaseEngine:
 
     def __init__(
         self,
+        sm: StateMachine,
         config: StateMachineConfig,
         dispatcher: EventDispatcher,
         transition_depth: int = 100,
     ):
+        self._sm = sm
         self._config = config
         self._dispatcher = dispatcher
+        self._info_pool = TransitionInfo(machine=sm)
         self._transition_depth = transition_depth
         self._running: bool = False
 
@@ -103,14 +107,14 @@ class BaseEngine:
         self._runtime.submit(self._start_on_runtime_loop()).result()
         self._running = True
 
-        record = AuditRecord(
-            machine_event=EngineEvent.MACHINE_START.name,
-            source=self._state,
-            trigger_event="None",
-            success=self._running,
-            timeline=[MicroStep()],
-        )
-        self._dispatcher.emit(record)
+        # record = AuditRecord(
+        #     machine_event=EngineEvent.MACHINE_START.name,
+        #     source=self._state,
+        #     trigger_event="None",
+        #     success=self._running,
+        #     timeline=[MicroStep()],
+        # )
+        # self._dispatcher.emit(record)
 
     async def _stop_worker(self) -> None:
         if self._running:
@@ -119,14 +123,14 @@ class BaseEngine:
             await self._worker_task
             self._running = False
 
-            record = AuditRecord(
-                machine_event=EngineEvent.MACHINE_STOP.name,
-                source=self._state,
-                trigger_event="None",
-                success=True,
-                timeline=[MicroStep()],
-            )
-            self._dispatcher.emit(record=record)
+            # record = AuditRecord(
+            #     machine_event=EngineEvent.MACHINE_STOP.name,
+            #     source=self._state,
+            #     trigger_event="None",
+            #     success=True,
+            #     timeline=[MicroStep()],
+            # )
+            # self._dispatcher.emit(record=record)
 
     async def _queue_task(self, task: Coroutine) -> None:
         future = self._runtime.create_future()
@@ -169,10 +173,37 @@ class AsyncEngine(BaseEngine):
             return
 
         self._context = context
-        self._state = initial_state  # self._config.states.get(initial_state)
+        self._state = initial_state
         self._start_worker()
 
-        return self.event_trigger(event=None, payload=None, is_async=is_async)
+        state = self._config.states[initial_state]
+        if state.on_entry:
+            record = AuditRecord(
+                event=EngineEvent.MACHINE_START.name,
+                source=self._state,
+            )
+            info = self._info_pool
+            info.source = state.state
+            info.event = EngineEvent.MACHINE_START.name
+            info.payload = None
+            record.transitions.append(self._info_pool)
+
+            async def start_machine():
+                token = active_audit_record.set(record)
+                await self.execute_actions(
+                    info=info, actions=state.on_entry, action_type=EngineStep.ON_ENTRY
+                )
+                active_audit_record.reset(token)
+                record.success = True
+                self._dispatcher.emit(record)
+
+            self._runtime.submit(coro=self._queue_task(start_machine())).result()
+
+        event = EngineEvent.DYNAMIC_TRANSITION.name
+        if (state.name, event) not in self._config.transitions:
+            event = EngineEvent.AUTOMATIC_TRANSITION.name
+
+        return self.event_trigger(event=event, payload=None, is_async=is_async)
 
     def stop_engine(self, is_async: bool, force: bool = False) -> Awaitable | None:
         if not self._running:
@@ -185,9 +216,10 @@ class AsyncEngine(BaseEngine):
         self._runtime.submit(coro=coro).result()
 
     def event_trigger(
-        self, event: EventSpec | None, payload: Any, is_async: bool
+        self, event: EventSpec, payload: Any, is_async: bool
     ) -> Awaitable | None:
-        coro = self.processing_loop(event=event, payload=payload)
+        record = AuditRecord(event=event)
+        coro = self.processing_loop(event=event, record=record, payload=payload)
 
         if is_async:
             return self._runtime.submit_async(coro=self._queue_task(coro))
@@ -195,18 +227,12 @@ class AsyncEngine(BaseEngine):
         self._runtime.submit(coro=self._queue_task(coro)).result()
 
     async def processing_loop(
-        self, event: EventSpec | None, payload: Any | None = None
+        self, event: EventSpec, record: AuditRecord, payload: Any | None = None
     ) -> None:
-        machine_event = (
-            EngineEvent.EVENT_TRIGGER if event else EngineEvent.NULL_TRANSITION
-        )
-        info = AuditRecord(
-            machine_event=machine_event.name,
-            trigger_event=event,
-            success=False,
-            payload=payload,
-        )
-        token = active_audit_record.set(info)
+        # machine_event = (
+        #     EngineEvent.EVENT_TRIGGER if event else EngineEvent.NULL_TRANSITION
+        # )
+        token = active_audit_record.set(record)
 
         # TODO: If a source state has multiple automatic transitions decide
         #       on how to evaluate them - maybe based on a priority flag.
@@ -216,7 +242,10 @@ class AsyncEngine(BaseEngine):
             transition_depth = 0
             while transition_depth < self._transition_depth and self._running:
                 source_state = self._config.states[self._state]
+                info = self._info_pool
                 info.source = source_state.state
+                info.event = self._config.events[event]
+                info.payload = payload
 
                 transitions = self.resolve_transitions(state=self._state, event=event)
 
@@ -231,6 +260,7 @@ class AsyncEngine(BaseEngine):
                     break  # Break if no valid transition is found
 
                 target = transition.target
+                event = transition.event
 
                 if transition.router:
                     target = await self.execute_choice_transition(
@@ -252,7 +282,6 @@ class AsyncEngine(BaseEngine):
                     )
 
                 self.apply_state_mutation(state=target)
-                info.success = True
 
                 if target_state.on_entry:
                     await self.evaluate_on_entry(state=target_state, info=info)
@@ -260,13 +289,15 @@ class AsyncEngine(BaseEngine):
                 if target_state.final_state:
                     break  # Break if target state is a final state
 
-                event = None
                 transition_depth += 1
         except Exception as e:
+            record.exception = e
+            record.success = False
             raise RuntimeError("Error in engine processing loop") from e
         finally:
+            record.success = True
             active_audit_record.reset(token)
-            self._dispatcher.emit(info)
+            self._dispatcher.emit(record)
 
     def apply_state_mutation(self, state: StateSpec) -> None:
         self._state = state
@@ -277,21 +308,21 @@ class AsyncEngine(BaseEngine):
     async def evaluate_guards(
         self,
         transitions: list[Transition],
-        info: Any,
+        info: TransitionInfo,
     ) -> Transition | None:
         for transition in transitions:
             guards = transition.guards
             if not guards or await self.execute_guards(guards=guards, info=info):
                 return transition
 
-    async def evaluate_on_entry(self, state: State, info: Any) -> None:
+    async def evaluate_on_entry(self, state: State, info: TransitionInfo) -> None:
         await self.execute_actions(
             info=info,
             actions=state.on_entry,
             action_type=EngineStep.ON_ENTRY,
         )
 
-    async def evaluate_on_exit(self, state: State, info: Any) -> None:
+    async def evaluate_on_exit(self, state: State, info: TransitionInfo) -> None:
         await self.execute_actions(
             info=info,
             actions=state.on_exit,
@@ -306,7 +337,7 @@ class AsyncEngine(BaseEngine):
     #     )
 
     async def evaluate_transition_action(
-        self, actions: list[CallbackSpec], info: Any
+        self, actions: list[CallbackSpec], info: TransitionInfo
     ) -> None:
         await self.execute_actions(
             info=info,
@@ -314,7 +345,9 @@ class AsyncEngine(BaseEngine):
             action_type=EngineStep.TRANSITION_ACTION,
         )
 
-    async def execute_guards(self, guards: Iterable[CallbackSpec], info: Any) -> bool:
+    async def execute_guards(
+        self, guards: Iterable[CallbackSpec], info: TransitionInfo
+    ) -> bool:
         for guard in guards:
             microstep = MicroStep(
                 micro_step=EngineStep.GUARD_EVALUATE.name, target=str(self._state)
@@ -336,7 +369,7 @@ class AsyncEngine(BaseEngine):
 
     async def execute_actions(
         self,
-        info: Any,
+        info: TransitionInfo,
         actions: Iterable[CallbackSpec],
         action_type: EngineStep,
     ) -> None:
@@ -355,7 +388,7 @@ class AsyncEngine(BaseEngine):
                 self._dispatcher.log_micro_step(microstep)
 
     async def execute_choice_transition(
-        self, router: RouterSpec, info: AuditRecord
+        self, router: RouterSpec, info: TransitionInfo
     ) -> StateSpec | None:
         result = invoke_callback(router, self._context, info)
         router_state = await result if router.is_async else result

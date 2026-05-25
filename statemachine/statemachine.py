@@ -62,9 +62,11 @@ class StateMachineBuilder:
         guards: Callbacks | None = None,
     ) -> StateMachineBuilder:
         source = _normalize_state_event(state)
+        event = EngineEvent.DYNAMIC_TRANSITION
+
         choice_transition = Transition(
             source=source,
-            event=None,
+            event=event.name,
             target=None,
             router=prepare_callbacks(router).pop(),
             actions=prepare_callbacks(actions),
@@ -72,7 +74,8 @@ class StateMachineBuilder:
         )
 
         self.add_state(state=state, on_entry=on_entry, on_exit=on_exit)
-        self._transitions.setdefault((source, None), []).append(choice_transition)
+        self._events[event.name] = event
+        self._transitions.setdefault((source, event.name), []).append(choice_transition)
         return self
 
     def add_state(
@@ -80,7 +83,7 @@ class StateMachineBuilder:
         state: StateSpec,
         on_entry: Callbacks | None = None,
         on_exit: Callbacks | None = None,
-        is_final_state: bool = False,
+        final_state: bool = False,
     ) -> StateMachineBuilder:
         state_name: StateSpec = _normalize_state_event(state)
         self._states[state_name] = State(
@@ -88,7 +91,7 @@ class StateMachineBuilder:
             state=state,
             on_exit=prepare_callbacks(on_exit),
             on_entry=prepare_callbacks(on_entry),
-            final_state=is_final_state,
+            final_state=final_state,
         )
         return self
 
@@ -96,11 +99,14 @@ class StateMachineBuilder:
     def add_transition(
         self,
         source: StateSpec,
-        event: EventSpec,
+        event: EventSpec | None,
         target: StateSpec,
         actions: Callbacks | None = None,
         guards: Callbacks | None = None,
     ) -> StateMachineBuilder:
+        if event is None:
+            event = EngineEvent.AUTOMATIC_TRANSITION
+
         source_name = _normalize_state_event(source)
         event_name = _normalize_state_event(event)
 
@@ -150,13 +156,13 @@ def audit_sink_callback(record: AuditRecord) -> None:
         timestamp = step.timestamp.strftime("%H:%M:%S.%f")[:-3]
         microstep = f"[{step.micro_step}]" if step.micro_step else ""
         success = f"{'SUCCESS' if record.success else 'FAILED'}"
-        event = f"{record.machine_event} {microstep}"
-        line = f"[{timestamp}] {event:<35} | {success:<7} | Source: {record.source}"
+        event = f"{record.event} {microstep}"
+        line = f"[{timestamp}] {event:<40} | {success:<7} | Source: {record.source}"
 
         detail_str = ""
-        if EngineEvent.EVENT_TRIGGER.name in record.machine_event:
+        if EngineEvent.EVENT_TRIGGER.name == record.event:
             detail_str += f" Event: {record.trigger_event}"
-        if EngineEvent.NULL_TRANSITION.name in record.machine_event:
+        if EngineEvent.AUTOMATIC_TRANSITION.name == record.event:
             detail_str += f" Event: {record.trigger_event}"
         if record.target and step.micro_step != EngineStep.GUARD_SKIP.name:
             detail_str += f" -> Target: {record.target}"
@@ -185,7 +191,7 @@ class StateMachine:
         self._is_async = is_async
         self._running = False
         self._engine = AsyncEngine(
-            config=config, dispatcher=dispatcher, transition_depth=100
+            sm=self, config=config, dispatcher=dispatcher, transition_depth=100
         )
 
     def start(self, initial_state: StateSpec, context: Any) -> Awaitable | None:

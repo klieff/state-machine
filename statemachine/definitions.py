@@ -23,7 +23,8 @@ class EngineEvent(Enum):
     TRANSITION_START = auto()
     TRANSITION_COMPLETE = auto()
     TRANSITION_FAIL = auto()
-    NULL_TRANSITION = auto()
+    AUTOMATIC_TRANSITION = auto()
+    DYNAMIC_TRANSITION = auto()
     EXCEPTION = auto()
 
 
@@ -49,21 +50,20 @@ class State:
 @dataclass(slots=True)
 class Transition:
     source: StateSpec
-    event: EventSpec | None
+    event: EventSpec
     target: StateSpec | None
     actions: list[CallbackSpec]
     guards: list[CallbackSpec]
     router: RouterSpec | None = None
 
 
-# TODO: Context that is passed to user-defined callbacks
-@dataclass(slots=True, frozen=True)
-class MachineContext[S: Enum, E: Enum]:
-    source: S
-    target: S
-    event: E
-    payload: Any
-    machine_instance: Any
+@dataclass(slots=True)
+class TransitionInfo:
+    machine: Any
+    payload: Any = None
+    source: StateSpec | None = None
+    event: EventSpec | None = None
+    target: StateSpec | None = None
 
 
 @dataclass(frozen=True)

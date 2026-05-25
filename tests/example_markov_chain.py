@@ -91,6 +91,7 @@ builder = (
     .add_choice_state(
         state=State.RESTING,
         actions=record_movement,
+        # on_entry=lambda: print("OMEGA LOL"),
         router=dynamic_router,
     )
     .add_choice_state(
@@ -117,8 +118,8 @@ builder = (
     # .add_state(State.PATROLLING)
     # .add_state(State.CHASING)
     # .add_state(State.SPOTTED)
-    .add_state(State.SURVIVED, is_final_state=True)
-    .add_state(State.EATEN, is_final_state=True)
+    .add_state(State.SURVIVED, final_state=True)
+    .add_state(State.EATEN, final_state=True)
     # .add_transition(
     #     source=State.RESTING,
     #     event=Event.TICK,
