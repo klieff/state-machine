@@ -9,7 +9,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
 from .audit import AuditRecord, MicroStep
-from .callbacks import CallbackSpec, invoke_callback
+from .callbacks import CallbackSpec
 from .definitions import EngineEvent, EngineStep, RouterSpec, TransitionInfo
 from .dispatcher import active_audit_record
 from .exceptions import ActionError, GuardError
@@ -20,9 +20,9 @@ if TYPE_CHECKING:
     from .statemachine import StateMachine
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class TaskRequest:
-    task: Coroutine
+    coro: Coroutine
     future: asyncio.Future[None]
 
 
@@ -100,61 +100,68 @@ class BaseEngine:
 
     async def _start_on_runtime_loop(self) -> None:
         self._queue: asyncio.Queue[TaskRequest | Literal["STOP"]] = asyncio.Queue()
-        self._worker_task = self._runtime.create_task(self._worker())
+        self._worker_task = self._runtime.create_task(self._queue_manager())
 
-    def _start_worker(self) -> None:
+    def _start_queue_manager(self) -> None:
         self._runtime.start()
         self._runtime.submit(self._start_on_runtime_loop()).result()
         self._running = True
 
-        # record = AuditRecord(
-        #     machine_event=EngineEvent.MACHINE_START.name,
-        #     source=self._state,
-        #     trigger_event="None",
-        #     success=self._running,
-        #     timeline=[MicroStep()],
-        # )
-        # self._dispatcher.emit(record)
-
-    async def _stop_worker(self) -> None:
+    async def _stop_queue_manager(self) -> None:
         if self._running:
+            self._drain_queue()
             await self._queue.put("STOP")
             await self._queue.join()
             await self._worker_task
             self._running = False
 
-            # record = AuditRecord(
-            #     machine_event=EngineEvent.MACHINE_STOP.name,
-            #     source=self._state,
-            #     trigger_event="None",
-            #     success=True,
-            #     timeline=[MicroStep()],
-            # )
-            # self._dispatcher.emit(record=record)
-
-    async def _queue_task(self, task: Coroutine) -> None:
+    async def _queue_task(self, coro: Coroutine[Any, Any, Any]) -> None:
         future = self._runtime.create_future()
-        await self._queue.put(TaskRequest(task=task, future=future))
+        await self._queue.put(TaskRequest(coro=coro, future=future))
         await future
 
-    async def _worker(self) -> None:
-        while True:
-            request = await self._queue.get()
-            if request == "STOP":
+    async def _queue_manager(self) -> None:
+        try:
+            while True:
+                request = await self._queue.get()
+                if request == "STOP":
+                    self._queue.task_done()
+                    break
+
+                try:
+                    await request.coro
+                    request.future.set_result(None)
+                except Exception as e:
+                    request.future.set_exception(e)
+                    break
+                finally:
+                    self._queue.task_done()
+        finally:
+            self._drain_queue()
+
+    def _drain_queue(self):
+        while not self._queue.empty():
+            try:
+                item = self._queue.get_nowait()
+                if item == "STOP":
+                    self._queue.task_done()
+                    break
+
+                if not item.future.done():
+                    item.future.cancel()
+
+                try:
+                    item.coro.close()
+                except RuntimeError:
+                    pass
+
                 self._queue.task_done()
+            except asyncio.QueueEmpty:
                 break
 
-            try:
-                await request.task
-                request.future.set_result(None)
-            except Exception as e:
-                request.future.set_exception(e)
-            finally:
-                self._queue.task_done()
-
-    async def _get_state(self) -> StateSpec:
-        self._runtime.assert_runtime_thread()
-        return self._state
+    # async def _get_state(self) -> StateSpec:
+    #     self._runtime.assert_runtime_thread()
+    #     return self._state
 
     # def _dispatch_internal_event(self, machine_event: EngineEvent) -> None:
     #     record = AuditRecord(machine_event=machine_event.name, source=self._state.state)
@@ -174,9 +181,14 @@ class AsyncEngine(BaseEngine):
 
         self._context = context
         self._state = initial_state
-        self._start_worker()
+        self._start_queue_manager()
 
         state = self._config.states[initial_state]
+        event = EngineEvent.DYNAMIC_TRANSITION.name
+
+        if (state.name, event) not in self._config.transitions:
+            event = None
+
         if state.on_entry:
             record = AuditRecord(
                 event=EngineEvent.MACHINE_START.name,
@@ -186,30 +198,38 @@ class AsyncEngine(BaseEngine):
             info.source = state.state
             info.event = EngineEvent.MACHINE_START.name
             info.payload = None
+            info.step = EngineStep.ON_ENTRY_EVALUATE.name
             record.transitions.append(self._info_pool)
 
-            async def start_machine():
+            async def start_machine() -> None:
                 token = active_audit_record.set(record)
-                await self.execute_actions(
-                    info=info, actions=state.on_entry, action_type=EngineStep.ON_ENTRY
+                await self._execute_actions(
+                    actions=state.on_entry, action_type=EngineStep.ON_ENTRY_EVALUATE
                 )
                 active_audit_record.reset(token)
                 record.success = True
                 self._dispatcher.emit(record)
 
-            self._runtime.submit(coro=self._queue_task(start_machine())).result()
+            if event is None and is_async:
+                return self._runtime.submit_async(
+                    coro=self._queue_task(start_machine())
+                )
+            else:
+                self._runtime.submit(coro=self._queue_task(start_machine())).result()
 
-        event = EngineEvent.DYNAMIC_TRANSITION.name
-        if (state.name, event) not in self._config.transitions:
-            event = EngineEvent.AUTOMATIC_TRANSITION.name
+        if event is not None:
+            return self.event_trigger(event=event, payload=None, is_async=is_async)
 
-        return self.event_trigger(event=event, payload=None, is_async=is_async)
+        async def coro():
+            pass
+
+        return coro()
 
     def stop_engine(self, is_async: bool, force: bool = False) -> Awaitable | None:
         if not self._running:
             return
 
-        coro = self._stop_worker()
+        coro = self._stop_queue_manager()
         if is_async:
             return self._runtime.submit_async(coro=coro)
 
@@ -219,14 +239,14 @@ class AsyncEngine(BaseEngine):
         self, event: EventSpec, payload: Any, is_async: bool
     ) -> Awaitable | None:
         record = AuditRecord(event=event)
-        coro = self.processing_loop(event=event, record=record, payload=payload)
+        coro = self._processing_loop(event=event, record=record, payload=payload)
 
         if is_async:
             return self._runtime.submit_async(coro=self._queue_task(coro))
 
         self._runtime.submit(coro=self._queue_task(coro)).result()
 
-    async def processing_loop(
+    async def _processing_loop(
         self, event: EventSpec, record: AuditRecord, payload: Any | None = None
     ) -> None:
         # machine_event = (
@@ -244,28 +264,28 @@ class AsyncEngine(BaseEngine):
                 source_state = self._config.states[self._state]
                 info = self._info_pool
                 info.source = source_state.state
-                info.event = self._config.events[event]
+                info.event = self._config.events.get(event)
                 info.payload = payload
 
-                transitions = self.resolve_transitions(state=self._state, event=event)
+                transitions = self._resolve_transitions(state=self._state, event=event)
 
                 if transitions is None:
                     break  # Break if transition map is empty
 
-                transition = await self.evaluate_guards(
-                    transitions=transitions, info=info
-                )
+                info.step = EngineStep.GUARD_EVALUATE.name
+                transition = await self._evaluate_guards(transitions=transitions)
 
                 if transition is None:
                     break  # Break if no valid transition is found
 
+                event = EngineEvent.AUTOMATIC_TRANSITION.name
                 target = transition.target
-                event = transition.event
 
-                if transition.router:
-                    target = await self.execute_choice_transition(
-                        router=transition.router, info=info
-                    )
+                # TODO: Should fail-fast and throw an exception if target state is not registered
+                if router := transition.router:
+                    info.step = EngineStep.ROUTER_EVALUATE.name
+                    target = await self._execute_choice_transition(router=router)
+                    event = EngineEvent.DYNAMIC_TRANSITION.name
 
                 if target is None:
                     break  # Break if dynamic router returns an invalid state
@@ -274,86 +294,72 @@ class AsyncEngine(BaseEngine):
                 info.target = target_state.state
 
                 if source_state.on_exit:
-                    await self.evaluate_on_exit(state=source_state, info=info)
+                    info.step = EngineStep.ON_EXIT_EVALUATE.name
+                    await self._evaluate_on_exit(state=source_state)
 
                 if transition.actions:
-                    await self.evaluate_transition_action(
-                        actions=transition.actions, info=info
-                    )
+                    info.step = EngineStep.ACTION_EVALUATE.name
+                    await self._evaluate_transition_action(actions=transition.actions)
 
-                self.apply_state_mutation(state=target)
+                self._apply_state_mutation(state=target)
 
                 if target_state.on_entry:
-                    await self.evaluate_on_entry(state=target_state, info=info)
+                    info.step = EngineStep.ON_ENTRY_EVALUATE.name
+                    await self._evaluate_on_entry(state=target_state)
 
                 if target_state.final_state:
                     break  # Break if target state is a final state
 
+                record.success = True
                 transition_depth += 1
         except Exception as e:
+            record.event = EngineEvent.EXCEPTION
             record.exception = e
             record.success = False
+            # await self._stop_queue_manager()
             raise RuntimeError("Error in engine processing loop") from e
         finally:
-            record.success = True
             active_audit_record.reset(token)
             self._dispatcher.emit(record)
 
-    def apply_state_mutation(self, state: StateSpec) -> None:
-        self._state = state
-        self._dispatcher.log_micro_step(
-            MicroStep(micro_step=EngineStep.STATE_CHANGE.name, result=True)
-        )
-
-    async def evaluate_guards(
-        self,
-        transitions: list[Transition],
-        info: TransitionInfo,
+    async def _evaluate_guards(
+        self, transitions: list[Transition]
     ) -> Transition | None:
         for transition in transitions:
             guards = transition.guards
-            if not guards or await self.execute_guards(guards=guards, info=info):
+            if not guards or await self._execute_guards(guards=guards):
                 return transition
 
-    async def evaluate_on_entry(self, state: State, info: TransitionInfo) -> None:
-        await self.execute_actions(
-            info=info,
-            actions=state.on_entry,
-            action_type=EngineStep.ON_ENTRY,
+    async def _evaluate_on_entry(self, state: State) -> None:
+        await self._execute_actions(
+            actions=state.on_entry, action_type=EngineStep.ON_ENTRY_EVALUATE
         )
 
-    async def evaluate_on_exit(self, state: State, info: TransitionInfo) -> None:
-        await self.execute_actions(
-            info=info,
-            actions=state.on_exit,
-            action_type=EngineStep.ON_EXIT,
+    async def _evaluate_on_exit(self, state: State) -> None:
+        await self._execute_actions(
+            actions=state.on_exit, action_type=EngineStep.ON_EXIT_EVALUATE
         )
 
     # async def evaluate_on_transition(self, source: S, target: S, info: Any) -> None:
-    #     await self.execute_actions(
+    #     await self._execute_actions(
     #         info=info,
     #         actions=self._config.on_transition.get((source, target)),
     #         action_type=EngineStep.ON_TRANSITION,
     #     )
 
-    async def evaluate_transition_action(
-        self, actions: list[CallbackSpec], info: TransitionInfo
-    ) -> None:
-        await self.execute_actions(
-            info=info,
+    async def _evaluate_transition_action(self, actions: list[CallbackSpec]) -> None:
+        await self._execute_actions(
             actions=actions,
-            action_type=EngineStep.TRANSITION_ACTION,
+            action_type=EngineStep.ACTION_EVALUATE,
         )
 
-    async def execute_guards(
-        self, guards: Iterable[CallbackSpec], info: TransitionInfo
-    ) -> bool:
+    async def _execute_guards(self, guards: Iterable[CallbackSpec]) -> bool:
         for guard in guards:
             microstep = MicroStep(
                 micro_step=EngineStep.GUARD_EVALUATE.name, target=str(self._state)
             )
             try:
-                result = invoke_callback(guard, self._context, info)
+                result = guard.invoke(self._context, self._info_pool)
                 passed = await result if guard.is_async else result
                 microstep.result = passed
             except Exception as e:
@@ -367,9 +373,8 @@ class AsyncEngine(BaseEngine):
 
         return True
 
-    async def execute_actions(
+    async def _execute_actions(
         self,
-        info: TransitionInfo,
         actions: Iterable[CallbackSpec],
         action_type: EngineStep,
     ) -> None:
@@ -378,7 +383,7 @@ class AsyncEngine(BaseEngine):
                 micro_step=action_type.name, target=action.callback.__name__
             )
             try:
-                result = invoke_callback(action, self._context, info)
+                result = action.invoke(self._context, self._info_pool)
                 result = await result if action.is_async else result
                 microstep.result = result
             except Exception as e:
@@ -387,18 +392,30 @@ class AsyncEngine(BaseEngine):
             finally:
                 self._dispatcher.log_micro_step(microstep)
 
-    async def execute_choice_transition(
-        self, router: RouterSpec, info: TransitionInfo
-    ) -> StateSpec | None:
-        result = invoke_callback(router, self._context, info)
-        router_state = await result if router.is_async else result
+    async def _execute_choice_transition(self, router: RouterSpec) -> StateSpec | None:
+        router_state = await self._execute_callback(callback=router)
         router_state_name = (
             router_state.name if isinstance(router_state, Enum) else router_state
         )
         if router_state_name in self._config.states:
             return router_state_name
 
-    def resolve_transitions(
+    async def _execute_callback(self, callback: CallbackSpec) -> Any:
+        try:
+            result = callback.invoke(self._context, self._info_pool)
+            result = await result if callback.is_async else result
+        except Exception as e:
+            raise e
+
+        return result
+
+    def _apply_state_mutation(self, state: StateSpec) -> None:
+        self._state = state
+        self._dispatcher.log_micro_step(
+            MicroStep(micro_step=EngineStep.STATE_CHANGE.name, result=True)
+        )
+
+    def _resolve_transitions(
         self, state: StateSpec, event: EventSpec | None
     ) -> list[Transition] | None:
         return self._config.transitions.get((state, event))

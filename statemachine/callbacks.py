@@ -10,12 +10,23 @@ from typing import Any, Callable, Coroutine, Iterable
 
 @dataclass(slots=True)
 class CallbackSpec:
+    name: str
     callback: Callable
     param_count: int
     is_async: bool
 
+    def invoke(self, context: Any, info: Any) -> Coroutine[Any, Any, Any] | Any:
+        if self.param_count == 0:
+            result = self.callback()
+        elif self.param_count == 1:
+            result = self.callback(context)
+        else:
+            result = self.callback(context, info)
 
-def get_callback_signature(callback: Callable) -> CallbackSpec:
+        return result
+
+
+def _get_callback_signature(callback: Callable) -> CallbackSpec:
     if iscoroutine(callback):
         raise TypeError(f"Callback must be callable, got {type(callback).__name__}")
 
@@ -31,7 +42,10 @@ def get_callback_signature(callback: Callable) -> CallbackSpec:
             break
 
     return CallbackSpec(
-        callback=callback, param_count=count, is_async=iscoroutinefunction(callback)
+        name=getattr(callback, "__name__", type(callback).__name__),
+        callback=callback,
+        param_count=count,
+        is_async=iscoroutinefunction(callback),
     )
 
 
@@ -39,18 +53,6 @@ def prepare_callbacks(callbacks: Iterable[Callable] | Callable | None) -> list:
     if callbacks is None:
         return []
     elif callable(callbacks):
-        return [get_callback_signature(callbacks)]
-    return [get_callback_signature(callback) for callback in callbacks]
+        return [_get_callback_signature(callbacks)]
 
-
-def invoke_callback[R](
-    spec: CallbackSpec, context: Any, info: Any
-) -> Coroutine[R, Any, Any] | R:
-    if spec.param_count == 0:
-        result = spec.callback()
-    elif spec.param_count == 1:
-        result = spec.callback(context)
-    else:
-        result = spec.callback(context, info)
-
-    return result
+    return [_get_callback_signature(callback) for callback in callbacks]

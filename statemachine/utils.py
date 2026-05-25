@@ -26,9 +26,9 @@
 #     return f"{line}{detail_str}"
 
 
-# def get_obj_name(obj) -> str:
-#     name = getattr(obj, "name", None)
-#     return name or getattr(obj, "__name__", type(obj).__name__)
+def get_obj_name(obj) -> str:
+    name = getattr(obj, "name", None)
+    return name or getattr(obj, "__name__", type(obj).__name__)
 
 
 def ensure_tuple(obj) -> tuple:

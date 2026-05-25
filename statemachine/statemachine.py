@@ -95,6 +95,33 @@ class StateMachineBuilder:
         )
         return self
 
+    def add_transient_state(
+        self,
+        source: StateSpec,
+        target: StateSpec,
+        on_entry: Callbacks | None = None,
+        on_exit: Callbacks | None = None,
+        actions: Callbacks | None = None,
+        guards: Callbacks | None = None,
+    ) -> StateMachineBuilder:
+        source = _normalize_state_event(source)
+        target = _normalize_state_event(target)
+        event = EngineEvent.AUTOMATIC_TRANSITION
+
+        choice_transition = Transition(
+            source=source,
+            event=event.name,
+            target=target,
+            actions=prepare_callbacks(actions),
+            guards=prepare_callbacks(guards),
+        )
+
+        # TODO: Ensure that a state only has ONE particular type otherwise fail-fast
+        self.add_state(state=source, on_entry=on_entry, on_exit=on_exit)
+        self._events[event.name] = event
+        self._transitions.setdefault((source, event.name), []).append(choice_transition)
+        return self
+
     # TODO: Guard against infinite loops, e.g., add_transition(State_X, None, State_X)
     def add_transition(
         self,
@@ -187,9 +214,9 @@ class StateMachine:
         dispatcher = EventDispatcher()
         # dispatcher.subscribe(callback=audit_sink_callback)
 
+        self._running = False
         self._config = config
         self._is_async = is_async
-        self._running = False
         self._engine = AsyncEngine(
             sm=self, config=config, dispatcher=dispatcher, transition_depth=100
         )
@@ -207,7 +234,7 @@ class StateMachine:
             initial_state=state, context=context, is_async=self._is_async
         )
 
-    def stop(self, force: bool = False):
+    def stop(self, force: bool = False) -> Awaitable | None:
         self._running = False
         return self._engine.stop_engine(is_async=self._is_async, force=force)
 

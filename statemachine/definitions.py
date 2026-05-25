@@ -29,13 +29,19 @@ class EngineEvent(Enum):
 
 
 class EngineStep(Enum):
-    GUARD_SKIP = auto()
     GUARD_EVALUATE = auto()
-    ON_ENTRY = auto()
-    ON_EXIT = auto()
+    ON_ENTRY_EVALUATE = auto()
+    ON_EXIT_EVALUATE = auto()
     ON_TRANSITION = auto()
+    ACTION_EVALUATE = auto()
+    ROUTER_EVALUATE = auto()
     STATE_CHANGE = auto()
-    TRANSITION_ACTION = auto()
+
+
+class StateType(Enum):
+    STANDARD = auto()
+    TRANSIENT = auto()
+    CHOICE = auto()
 
 
 @dataclass(slots=True)
@@ -44,6 +50,7 @@ class State:
     state: StateSpec
     on_exit: list[CallbackSpec]
     on_entry: list[CallbackSpec]
+    type: StateType
     final_state: bool = False
 
 
@@ -64,6 +71,7 @@ class TransitionInfo:
     source: StateSpec | None = None
     event: EventSpec | None = None
     target: StateSpec | None = None
+    step: str = ""
 
 
 @dataclass(frozen=True)
@@ -100,25 +108,3 @@ class StateMachineConfig:
 
                 if target not in self.states and target is not None:
                     raise TypeError(f"Target state '{target}' is not a valid state.")
-
-
-# @dataclass(slots=True)
-# class EventDetails[S: Enum, E: Enum, C]:
-#     source: S | None = None
-#     target: S | None = None
-#     event: E | None = None
-#     action: Action[C] | None = None
-#     action_type: str | None = None
-#     guard: Guard[C] | None = None
-#     passed: bool | None = None
-#     error_type: str | None = None
-#     error_message: str | None = None
-#     original_exception: str | None = None
-#
-#
-# @dataclass(slots=True)
-# class EventRecord[S: Enum, E: Enum, C]:
-#     machine: str
-#     machine_event: str
-#     details: EventDetails[S, E, C]
-#     timestamp: datetime = field(default_factory=datetime.now)
