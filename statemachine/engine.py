@@ -22,8 +22,10 @@ from .exceptions import (
 from .utils import normalize_state_event
 
 if TYPE_CHECKING:
+    from .configuration import ConfigSpec
     from .definitions import EventSpec, State, StateMachineConfig, StateSpec, Transition
     from .dispatcher import EventDispatcher
+
     from .statemachine import SyncStateMachine, AsyncStateMachine
 
 
@@ -94,7 +96,7 @@ class BaseEngine:
     def __init__(
         self,
         sm: SyncStateMachine | AsyncStateMachine,
-        config: StateMachineConfig,
+        config: ConfigSpec,
         dispatcher: EventDispatcher,
         depth: int = 100,
     ):
@@ -186,19 +188,27 @@ class AsyncEngine(BaseEngine):
         if self._running:
             return
 
-        state_name = normalize_state_event(initial_state)
+        state_name = initial_state
         if state_name not in self._config.states:
             raise InvalidState
 
         state = self._config.states[state_name]
-        event = EngineEvent.DYNAMIC_TRANSITION.name
+        event = (
+            EngineEvent.DYNAMIC_TRANSITION
+            if state.type is StateType.CHOICE
+            else (
+                EngineEvent.AUTOMATIC_TRANSITION
+                if state.type is StateType.TRANSIENT
+                else None
+            )
+        )
 
         self._context = context
         self._state = state
         self._start_queue_manager()
 
-        if (state.name, event) not in self._config.transitions:
-            event = None
+        # if (state.name, event) not in self._config.transitions:
+        #     event = None
 
         if state.on_entry:
             record = AuditRecord(
@@ -231,10 +241,12 @@ class AsyncEngine(BaseEngine):
         if event is not None:
             return self.event_trigger(event=event, payload=None, is_async=is_async)
 
-        async def coro():
-            pass
+        if is_async:
 
-        return coro()
+            async def coro():
+                pass
+
+            return coro()
 
     def stop_engine(self, is_async: bool, force: bool = False) -> Coroutine | None:
         if not self._running:
@@ -252,12 +264,13 @@ class AsyncEngine(BaseEngine):
         if not self._running:
             raise UninitializedError(machine_name=self._config.name)
 
-        event_name = normalize_state_event(event)
-        if self._config.events.get(event_name) is None:
+        # event_name = normalize_state_event(event)
+        # if self._config.events.get(event_name) is None:
+        if self._config.events.get(event) is None:
             raise InvalidEvent
 
-        record = AuditRecord(event=event_name)
-        coro = self._processing_loop(event=event_name, record=record, payload=payload)
+        record = AuditRecord(event=event)
+        coro = self._processing_loop(event=event, record=record, payload=payload)
 
         if is_async:
             return self._runtime.submit_async(coro=self._queue_task(coro))
@@ -325,9 +338,9 @@ class AsyncEngine(BaseEngine):
                     break  # Break if target state is a final state
 
                 if target_state.type is StateType.TRANSIENT:
-                    event = EngineEvent.AUTOMATIC_TRANSITION.name
+                    event = EngineEvent.AUTOMATIC_TRANSITION
                 elif target_state.type is StateType.CHOICE:
-                    event = EngineEvent.DYNAMIC_TRANSITION.name
+                    event = EngineEvent.DYNAMIC_TRANSITION
                 else:
                     break  # Break if no automatic/dynamic transitions
 
@@ -412,11 +425,13 @@ class AsyncEngine(BaseEngine):
 
     async def _execute_choice_transition(self, router: RouterSpec) -> State | None:
         router_state = await self._execute_callback(callback=router)
-        router_state_name = (
-            router_state.name if isinstance(router_state, Enum) else router_state
-        )
-        if router_state_name in self._config.states:
-            return self._config.states[router_state_name]
+        # router_state_name = (
+        #     router_state.name if isinstance(router_state, Enum) else router_state
+        # )
+        # if router_state_name in self._config.states:
+        #     return self._config.states[router_state_name]
+        if router_state in self._config.states:
+            return self._config.states[router_state]
 
     async def _execute_callback(self, callback: CallbackSpec) -> Any:
         try:
@@ -434,9 +449,9 @@ class AsyncEngine(BaseEngine):
         )
 
     def _resolve_transitions(
-        self, state: State, event: EventSpec | None
+        self, state: State, event: EventSpec
     ) -> list[Transition] | None:
-        return self._config.transitions.get((state.name, event))
+        return self._config.transitions.get((state.state, event))
 
     # async def execute_validators(self) -> None:
     #     event_record = self.sm._dispatch_event(

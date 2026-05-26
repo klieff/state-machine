@@ -1,9 +1,17 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from .callbacks import prepare_callbacks
-from .definitions import Callbacks, EventSpec, State, StateSpec, StateType, Transition
+from .definitions import (
+    Callbacks,
+    EngineEvent,
+    EventSpec,
+    State,
+    StateSpec,
+    StateType,
+    Transition,
+)
 
 
 class ConfigurationError(Exception): ...
@@ -18,10 +26,13 @@ class ConfigSpec:
     # on_transition: TransitionAction
 
 
+@dataclass(slots=True)
 class StateMachineConfigs:
-    events: dict[EventSpec, EventSpec]
-    states: dict[StateSpec, State]
-    transitions: dict[tuple[StateSpec, EventSpec], list[Transition]]
+    events: dict[EventSpec, EventSpec] = field(default_factory=dict)
+    states: dict[StateSpec, State] = field(default_factory=dict)
+    transitions: dict[tuple[StateSpec, EventSpec], list[Transition]] = field(
+        default_factory=dict
+    )
 
     def add_event(self, event: EventSpec):
         self.events[event] = event
@@ -35,7 +46,7 @@ class StateMachineConfigs:
         final_state: bool = False,
     ) -> None:
         _state = self.states.get(state)
-        if _state is None:
+        if _state is not None:
             raise ConfigurationError(f"State '{state}' is already registered.")
 
         s = State(
@@ -60,10 +71,11 @@ class StateMachineConfigs:
     ) -> None:
         source_state = self.states.get(source)
         target_state = self.states.get(target)
+        self.events[event] = event
 
         if source_state is None:
-            raise ConfigurationError(f"Source state '{source}' is already registered.")
-        if target_state is None:
+            raise ConfigurationError(f"Source state '{source}' is not registered.")
+        if target_state is None and event is not EngineEvent.DYNAMIC_TRANSITION:
             raise ConfigurationError(f"Target state '{target}' is not registered.")
 
         t = Transition(
@@ -103,8 +115,8 @@ class StateMachineConfigs:
 
         for transitions in self.transitions.values():
             for t in transitions:
-                source = t.source.name
-                target = t.target.name if t.target else t.target
+                source = t.source.state
+                target = t.target.state if t.target else t.target
                 if source not in self.states:
                     raise ConfigurationError(
                         f"Source state '{source}' is not a valid state."
