@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from .audit import AuditRecord, MicroStep
 from .callbacks import CallbackSpec
-from .definitions import EngineEvent, EngineStep, RouterSpec, TransitionInfo
+from .definitions import EngineEvent, EngineStep, RouterSpec, StateType, TransitionInfo
 from .dispatcher import active_audit_record
 from .exceptions import ActionError, GuardError
 
 if TYPE_CHECKING:
-    from .definitions import StateMachineConfig, Transition, State, StateSpec, EventSpec
+    from .definitions import EventSpec, State, StateMachineConfig, StateSpec, Transition
     from .dispatcher import EventDispatcher
     from .statemachine import StateMachine
 
@@ -81,7 +81,7 @@ class EngineRuntime:
 
 # TODO: Implement a drain queue instead of a permanent queue per instance
 class BaseEngine:
-    _state: StateSpec
+    _state: State
     _runtime: EngineRuntime = EngineRuntime()
 
     def __init__(
@@ -179,12 +179,12 @@ class AsyncEngine(BaseEngine):
         if self._running:
             return
 
-        self._context = context
-        self._state = initial_state
-        self._start_queue_manager()
-
         state = self._config.states[initial_state]
         event = EngineEvent.DYNAMIC_TRANSITION.name
+
+        self._context = context
+        self._state = state
+        self._start_queue_manager()
 
         if (state.name, event) not in self._config.transitions:
             event = None
@@ -192,7 +192,7 @@ class AsyncEngine(BaseEngine):
         if state.on_entry:
             record = AuditRecord(
                 event=EngineEvent.MACHINE_START.name,
-                source=self._state,
+                source=self._state.name,
             )
             info = self._info_pool
             info.source = state.state
@@ -249,9 +249,6 @@ class AsyncEngine(BaseEngine):
     async def _processing_loop(
         self, event: EventSpec, record: AuditRecord, payload: Any | None = None
     ) -> None:
-        # machine_event = (
-        #     EngineEvent.EVENT_TRIGGER if event else EngineEvent.NULL_TRANSITION
-        # )
         token = active_audit_record.set(record)
 
         # TODO: If a source state has multiple automatic transitions decide
@@ -261,7 +258,7 @@ class AsyncEngine(BaseEngine):
         try:
             transition_depth = 0
             while transition_depth < self._transition_depth and self._running:
-                source_state = self._config.states[self._state]
+                source_state = self._state
                 info = self._info_pool
                 info.source = source_state.state
                 info.event = self._config.events.get(event)
@@ -278,19 +275,16 @@ class AsyncEngine(BaseEngine):
                 if transition is None:
                     break  # Break if no valid transition is found
 
-                event = EngineEvent.AUTOMATIC_TRANSITION.name
-                target = transition.target
+                target_state = transition.target
 
                 # TODO: Should fail-fast and throw an exception if target state is not registered
                 if router := transition.router:
                     info.step = EngineStep.ROUTER_EVALUATE.name
-                    target = await self._execute_choice_transition(router=router)
-                    event = EngineEvent.DYNAMIC_TRANSITION.name
+                    target_state = await self._execute_choice_transition(router=router)
 
-                if target is None:
+                if target_state is None:
                     break  # Break if dynamic router returns an invalid state
 
-                target_state = self._config.states[target]
                 info.target = target_state.state
 
                 if source_state.on_exit:
@@ -301,22 +295,28 @@ class AsyncEngine(BaseEngine):
                     info.step = EngineStep.ACTION_EVALUATE.name
                     await self._evaluate_transition_action(actions=transition.actions)
 
-                self._apply_state_mutation(state=target)
+                self._apply_state_mutation(state=target_state)
 
                 if target_state.on_entry:
                     info.step = EngineStep.ON_ENTRY_EVALUATE.name
                     await self._evaluate_on_entry(state=target_state)
 
+                record.success = True
+
                 if target_state.final_state:
                     break  # Break if target state is a final state
 
-                record.success = True
+                if target_state.type is StateType.TRANSIENT:
+                    event = EngineEvent.AUTOMATIC_TRANSITION.name
+                elif target_state.type is StateType.CHOICE:
+                    event = EngineEvent.DYNAMIC_TRANSITION.name
+                else:
+                    break  # Break if no automatic/dynamic transitions
+
                 transition_depth += 1
         except Exception as e:
             record.event = EngineEvent.EXCEPTION
             record.exception = e
-            record.success = False
-            # await self._stop_queue_manager()
             raise RuntimeError("Error in engine processing loop") from e
         finally:
             active_audit_record.reset(token)
@@ -356,7 +356,7 @@ class AsyncEngine(BaseEngine):
     async def _execute_guards(self, guards: Iterable[CallbackSpec]) -> bool:
         for guard in guards:
             microstep = MicroStep(
-                micro_step=EngineStep.GUARD_EVALUATE.name, target=str(self._state)
+                micro_step=EngineStep.GUARD_EVALUATE.name, target=str(self._state.name)
             )
             try:
                 result = guard.invoke(self._context, self._info_pool)
@@ -392,13 +392,13 @@ class AsyncEngine(BaseEngine):
             finally:
                 self._dispatcher.log_micro_step(microstep)
 
-    async def _execute_choice_transition(self, router: RouterSpec) -> StateSpec | None:
+    async def _execute_choice_transition(self, router: RouterSpec) -> State | None:
         router_state = await self._execute_callback(callback=router)
         router_state_name = (
             router_state.name if isinstance(router_state, Enum) else router_state
         )
         if router_state_name in self._config.states:
-            return router_state_name
+            return self._config.states[router_state_name]
 
     async def _execute_callback(self, callback: CallbackSpec) -> Any:
         try:
@@ -409,16 +409,16 @@ class AsyncEngine(BaseEngine):
 
         return result
 
-    def _apply_state_mutation(self, state: StateSpec) -> None:
+    def _apply_state_mutation(self, state: State) -> None:
         self._state = state
         self._dispatcher.log_micro_step(
             MicroStep(micro_step=EngineStep.STATE_CHANGE.name, result=True)
         )
 
     def _resolve_transitions(
-        self, state: StateSpec, event: EventSpec | None
+        self, state: State, event: EventSpec | None
     ) -> list[Transition] | None:
-        return self._config.transitions.get((state, event))
+        return self._config.transitions.get((state.name, event))
 
     # async def execute_validators(self) -> None:
     #     event_record = self.sm._dispatch_event(

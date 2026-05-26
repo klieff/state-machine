@@ -14,6 +14,7 @@ from .definitions import (
     StateMachineConfig,
     State,
     StateSpec,
+    StateType,
     Transition,
 )
 from .dispatcher import EventDispatcher
@@ -34,6 +35,24 @@ def _normalize_state_event(spec: StateSpec | EventSpec) -> str:
     return str(spec)
 
 
+def _prepare_state(
+    type: StateType,
+    state: StateSpec,
+    on_entry: Callbacks | None = None,
+    on_exit: Callbacks | None = None,
+) -> State:
+    state_name = _normalize_state_event(state)
+    state_obj = State(
+        type=type,
+        name=state_name,
+        state=state,
+        on_exit=prepare_callbacks(on_exit),
+        on_entry=prepare_callbacks(on_entry),
+    )
+
+    return state_obj
+
+
 class StateMachineBuilder:
     _counter: ClassVar = itertools.count(start=1)
 
@@ -52,6 +71,24 @@ class StateMachineBuilder:
             self._audit_sink = audit_sink
         return self
 
+    def add_state(
+        self,
+        state: StateSpec,
+        on_entry: Callbacks | None = None,
+        on_exit: Callbacks | None = None,
+        final_state: bool = False,
+    ) -> StateMachineBuilder:
+        state_name: StateSpec = _normalize_state_event(state)
+        if state_name in self._states:
+            raise RuntimeError("State {state_name} already registered.")
+
+        state_obj = _prepare_state(
+            type=StateType.STANDARD, state=state, on_entry=on_entry, on_exit=on_exit
+        )
+        state_obj.final_state = final_state
+        self._states[state_name] = state_obj
+        return self
+
     def add_choice_state(
         self,
         state: StateSpec,
@@ -61,11 +98,17 @@ class StateMachineBuilder:
         actions: Callbacks | None = None,
         guards: Callbacks | None = None,
     ) -> StateMachineBuilder:
-        source = _normalize_state_event(state)
+        state_name = _normalize_state_event(state)
+        if state_name in self._states:
+            raise RuntimeError("State {state_name} already registered.")
+
         event = EngineEvent.DYNAMIC_TRANSITION
+        source_state = _prepare_state(
+            type=StateType.CHOICE, state=state, on_entry=on_entry, on_exit=on_exit
+        )
 
         choice_transition = Transition(
-            source=source,
+            source=source_state,
             event=event.name,
             target=None,
             router=prepare_callbacks(router).pop(),
@@ -73,25 +116,10 @@ class StateMachineBuilder:
             guards=prepare_callbacks(guards),
         )
 
-        self.add_state(state=state, on_entry=on_entry, on_exit=on_exit)
+        self._states[state_name] = source_state
         self._events[event.name] = event
-        self._transitions.setdefault((source, event.name), []).append(choice_transition)
-        return self
-
-    def add_state(
-        self,
-        state: StateSpec,
-        on_entry: Callbacks | None = None,
-        on_exit: Callbacks | None = None,
-        final_state: bool = False,
-    ) -> StateMachineBuilder:
-        state_name: StateSpec = _normalize_state_event(state)
-        self._states[state_name] = State(
-            name=state_name,
-            state=state,
-            on_exit=prepare_callbacks(on_exit),
-            on_entry=prepare_callbacks(on_entry),
-            final_state=final_state,
+        self._transitions.setdefault((state_name, event.name), []).append(
+            choice_transition
         )
         return self
 
@@ -104,44 +132,52 @@ class StateMachineBuilder:
         actions: Callbacks | None = None,
         guards: Callbacks | None = None,
     ) -> StateMachineBuilder:
-        source = _normalize_state_event(source)
-        target = _normalize_state_event(target)
+        source_name = _normalize_state_event(source)
+        target_name = _normalize_state_event(target)
         event = EngineEvent.AUTOMATIC_TRANSITION
 
-        choice_transition = Transition(
-            source=source,
+        if source_name in self._states:
+            raise RuntimeError("Source state {state_name} already registered.")
+        if target_name in self._states:
+            raise RuntimeError("Target state {state_name} not registered.")
+
+        source_state = _prepare_state(
+            type=StateType.TRANSIENT, state=source, on_entry=on_entry, on_exit=on_exit
+        )
+
+        transient_transition = Transition(
+            source=source_state,
             event=event.name,
-            target=target,
+            target=self._states[target_name],
             actions=prepare_callbacks(actions),
             guards=prepare_callbacks(guards),
         )
 
-        # TODO: Ensure that a state only has ONE particular type otherwise fail-fast
-        self.add_state(state=source, on_entry=on_entry, on_exit=on_exit)
+        self._states[source_name] = source_state
         self._events[event.name] = event
-        self._transitions.setdefault((source, event.name), []).append(choice_transition)
+        self._transitions.setdefault((source_name, event.name), []).append(
+            transient_transition
+        )
         return self
 
     # TODO: Guard against infinite loops, e.g., add_transition(State_X, None, State_X)
     def add_transition(
         self,
         source: StateSpec,
-        event: EventSpec | None,
+        event: EventSpec,
         target: StateSpec,
         actions: Callbacks | None = None,
         guards: Callbacks | None = None,
     ) -> StateMachineBuilder:
-        if event is None:
-            event = EngineEvent.AUTOMATIC_TRANSITION
-
         source_name = _normalize_state_event(source)
+        target_name = _normalize_state_event(target)
         event_name = _normalize_state_event(event)
 
         self._events[event_name] = event
         self._transitions.setdefault((source_name, event_name), []).append(
             Transition(
-                source=source_name,
-                target=_normalize_state_event(target),
+                source=self._states[source_name],
+                target=self._states[target_name],
                 event=event_name,
                 actions=prepare_callbacks(actions),
                 guards=prepare_callbacks(guards),
@@ -254,4 +290,4 @@ class StateMachine:
 
     # FIX: Define a dedicated state getter in engine class def
     def get_state(self) -> StateSpec:
-        return self._engine._state
+        return self._engine._state.state

@@ -46,19 +46,19 @@ class StateType(Enum):
 
 @dataclass(slots=True)
 class State:
+    type: StateType
     name: str
     state: StateSpec
     on_exit: list[CallbackSpec]
     on_entry: list[CallbackSpec]
-    type: StateType
     final_state: bool = False
 
 
 @dataclass(slots=True)
 class Transition:
-    source: StateSpec
+    source: State
     event: EventSpec
-    target: StateSpec | None
+    target: State | None
     actions: list[CallbackSpec]
     guards: list[CallbackSpec]
     router: RouterSpec | None = None
@@ -100,9 +100,9 @@ class StateMachineConfig:
                 )
 
         for transitions in self.transitions.values():
-            for transition in transitions:
-                source = transition.source
-                target = transition.target
+            for t in transitions:
+                source = t.source.name
+                target = t.target.name if t.target else t.target
                 if source not in self.states:
                     raise TypeError(f"Source state '{source}' is not a valid state.")
 

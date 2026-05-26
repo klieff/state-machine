@@ -19,7 +19,7 @@ class AuditRecord:
     source: StateSpec = ""
     target: StateSpec = ""
     trigger_event: EventSpec | None = None
-    success: bool = True
+    success: bool = False
     exception: Exception | None = None
     transitions: list[TransitionInfo] = field(default_factory=list)
     timeline: list[MicroStep] = field(default_factory=list)
