@@ -1,5 +1,7 @@
+from enum import Enum
 # from typing import TYPE_CHECKING
-# from .definitions import EngineEvent
+
+from .definitions import StateSpec, EventSpec
 
 # if TYPE_CHECKING:
 #     from .definitions import EventRecord
@@ -24,6 +26,12 @@
 #         detail_str += f" Exception [{details.error_type}]: {details.error_message}"
 #
 #     return f"{line}{detail_str}"
+
+
+def normalize_state_event(spec: StateSpec | EventSpec) -> str:
+    if isinstance(spec, Enum):
+        return spec.name
+    return str(spec)
 
 
 def get_obj_name(obj) -> str:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Awaitable, Callable, Coroutine, Iterable
+from collections.abc import Callable, Coroutine, Iterable
 from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum
@@ -12,12 +12,19 @@ from .audit import AuditRecord, MicroStep
 from .callbacks import CallbackSpec
 from .definitions import EngineEvent, EngineStep, RouterSpec, StateType, TransitionInfo
 from .dispatcher import active_audit_record
-from .exceptions import ActionError, GuardError
+from .exceptions import (
+    ActionError,
+    GuardError,
+    InvalidEvent,
+    InvalidState,
+    UninitializedError,
+)
+from .utils import normalize_state_event
 
 if TYPE_CHECKING:
     from .definitions import EventSpec, State, StateMachineConfig, StateSpec, Transition
     from .dispatcher import EventDispatcher
-    from .statemachine import StateMachine
+    from .statemachine import SyncStateMachine, AsyncStateMachine
 
 
 @dataclass(slots=True, frozen=True)
@@ -86,16 +93,16 @@ class BaseEngine:
 
     def __init__(
         self,
-        sm: StateMachine,
+        sm: SyncStateMachine | AsyncStateMachine,
         config: StateMachineConfig,
         dispatcher: EventDispatcher,
-        transition_depth: int = 100,
+        depth: int = 100,
     ):
         self._sm = sm
         self._config = config
         self._dispatcher = dispatcher
         self._info_pool = TransitionInfo(machine=sm)
-        self._transition_depth = transition_depth
+        self._transition_depth = depth
         self._running: bool = False
 
     async def _start_on_runtime_loop(self) -> None:
@@ -175,11 +182,15 @@ class BaseEngine:
 class AsyncEngine(BaseEngine):
     def start_engine(
         self, initial_state: StateSpec, context: Any, is_async: bool
-    ) -> Awaitable | None:
+    ) -> Coroutine | None:
         if self._running:
             return
 
-        state = self._config.states[initial_state]
+        state_name = normalize_state_event(initial_state)
+        if state_name not in self._config.states:
+            raise InvalidState
+
+        state = self._config.states[state_name]
         event = EngineEvent.DYNAMIC_TRANSITION.name
 
         self._context = context
@@ -225,7 +236,7 @@ class AsyncEngine(BaseEngine):
 
         return coro()
 
-    def stop_engine(self, is_async: bool, force: bool = False) -> Awaitable | None:
+    def stop_engine(self, is_async: bool, force: bool = False) -> Coroutine | None:
         if not self._running:
             return
 
@@ -237,9 +248,16 @@ class AsyncEngine(BaseEngine):
 
     def event_trigger(
         self, event: EventSpec, payload: Any, is_async: bool
-    ) -> Awaitable | None:
-        record = AuditRecord(event=event)
-        coro = self._processing_loop(event=event, record=record, payload=payload)
+    ) -> Coroutine | None:
+        if not self._running:
+            raise UninitializedError(machine_name=self._config.name)
+
+        event_name = normalize_state_event(event)
+        if self._config.events.get(event_name) is None:
+            raise InvalidEvent
+
+        record = AuditRecord(event=event_name)
+        coro = self._processing_loop(event=event_name, record=record, payload=payload)
 
         if is_async:
             return self._runtime.submit_async(coro=self._queue_task(coro))
