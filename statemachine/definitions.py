@@ -40,7 +40,7 @@ class EngineStep(Enum):
 
 class StateType(Enum):
     STANDARD = auto()
-    TRANSIENT = auto()
+    AUTOMATIC = auto()
     CHOICE = auto()
 
 
@@ -58,7 +58,7 @@ class State:
 class Transition:
     source: State
     event: EventSpec
-    target: State | None
+    target: State
     actions: list[CallbackSpec]
     guards: list[CallbackSpec]
     router: RouterSpec | None = None

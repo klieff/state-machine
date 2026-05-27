@@ -35,48 +35,48 @@ class Context:
     id: int
 
 
-def visualize_state_machine(
-    transition_map: TransitionMap, filename="state_diagram.dot"
-):
-    dot = Digraph()
-    dot.attr(rankdir="TB", nodesep="0.5", ranksep="1.0")
-    dot.attr(
-        "node", shape="circle", fontname="Arial", style="filled", fillcolor="white"
-    )
-
-    for (start_state, event), transitions in transition_map.items():
-        event_name = event.name if event else "auto"
-
-        for end_state, actions, guards in transitions:
-            label_parts = [f"{event_name}"]
-            if guards:
-                for guard in guards:
-                    label_parts.append(f"\n[{guard.__name__}]")
-            if actions:
-                for action in actions:
-                    label_parts.append(f"\n{action.__name__}")
-
-            edge_label = " ".join(label_parts)
-
-            edge_style = "dashed" if event is None else "solid"
-
-            dot.edge(
-                str(start_state.name),
-                str(end_state.name),
-                label=edge_label,
-                style=edge_style,
-                fontsize="10",
-            )
-    dot.save(filename)
-    # dot.render(filename, view=True)
+# def visualize_state_machine(
+#     transition_map: TransitionMap, filename="state_diagram.dot"
+# ):
+#     dot = Digraph()
+#     dot.attr(rankdir="TB", nodesep="0.5", ranksep="1.0")
+#     dot.attr(
+#         "node", shape="circle", fontname="Arial", style="filled", fillcolor="white"
+#     )
+#
+#     for (start_state, event), transitions in transition_map.items():
+#         event_name = event.name if event else "auto"
+#
+#         for end_state, actions, guards in transitions:
+#             label_parts = [f"{event_name}"]
+#             if guards:
+#                 for guard in guards:
+#                     label_parts.append(f"\n[{guard.__name__}]")
+#             if actions:
+#                 for action in actions:
+#                     label_parts.append(f"\n{action.__name__}")
+#
+#             edge_label = " ".join(label_parts)
+#
+#             edge_style = "dashed" if event is None else "solid"
+#
+#             dot.edge(
+#                 str(start_state.name),
+#                 str(end_state.name),
+#                 label=edge_label,
+#                 style=edge_style,
+#                 fontsize="10",
+#             )
+#     dot.save(filename)
+# dot.render(filename, view=True)
 
 
 def test_initial_state():
-    sm = StateMachineBuilder[State, Event, Context]()
+    sm = StateMachineBuilder().build()
     # .add_transition(State.OFFLINE, Event.CONNECT, State.ONLINE)
 
     try:
-        sm.build(initial_state=State.PROCESSED, verbose=True)
+        sm.start(initial_state=State.PROCESSED, context=None)
     # except InvalidState as e:
     except TransitionMapError as e:
         return e
@@ -102,28 +102,32 @@ def test_dead_state_exit():
         pass
 
     sm_model = (
-        StateMachineBuilder[State, Event, Context]()
+        StateMachineBuilder()
         # .add_transition(State.OFFLINE, Event.CONNECT, State.OFFLINE)
-        .add_transition(
-            State.OFFLINE, None, State.ONLINE, action=(test_on_action1, test_on_action2)
+        .add_state(State.OFFLINE, on_exit=test_on_exit)
+        .add_state(State.PROCESSED, on_entry=test_on_exit)
+        .add_automatic_state(
+            State.OFFLINE,
+            State.ONLINE,
+            actions=(test_on_action1, test_on_action2),
+            on_exit=test_on_exit,
         )
-        .add_transition(State.ONLINE, None, State.PENDING)
-        .add_transition(State.PENDING, None, State.PROCESSED, guard=test_guard_fail)
-        .add_transition(State.PENDING, None, State.OFFLINE, action=test_on_exit)
+        .add_automatic_state(State.ONLINE, State.PENDING)
+        .add_automatic_state(State.PENDING, State.PROCESSED, guards=test_guard_fail)
+        .add_automatic_state(State.PENDING, State.OFFLINE, actions=test_on_exit)
         .add_transition(
-            State.PROCESSED, Event.RESTORE, State.RESTORING, action=test_on_exit
+            State.PROCESSED, Event.RESTORE, State.RESTORING, actions=test_on_exit
         )
-        .on_exit(State.OFFLINE, test_on_exit)
-        .on_entry(State.PROCESSED, test_on_exit)
     )
 
     # tm = sm_model.get_transition_map()
     # visualize_state_machine(tm)
 
-    sm = sm_model.build(initial_state=State.OFFLINE, verbose=True)
-    sm.start(context=Context())
+    ctx = Context()
+    sm = sm_model.build()
+    sm.start(initial_state=State.OFFLINE, context=ctx)
+    sm.trigger(event=Event.CONNECT)
     sm.stop()
-    # sm.trigger(event=Event.CONNECT, context=Context())
     assert result == [True, True], f"Expected True, got {result}"
 
 

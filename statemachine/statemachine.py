@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Callable
+from inspect import iscoroutine
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from .audit import AuditRecord
@@ -94,7 +95,7 @@ class StateMachineBuilder:
         )
         return self
 
-    def add_transient_state(
+    def add_automatic_state(
         self,
         source: StateSpec,
         target: StateSpec,
@@ -104,7 +105,7 @@ class StateMachineBuilder:
         guards: Callbacks | None = None,
     ) -> StateMachineBuilder:
         self._config.add_state(
-            type=StateType.TRANSIENT, state=source, on_entry=on_entry, on_exit=on_exit
+            type=StateType.AUTOMATIC, state=source, on_entry=on_entry, on_exit=on_exit
         )
         self._config.add_transition(
             source=source,
@@ -191,9 +192,10 @@ class AsyncStateMachine:
         self._engine = AsyncEngine(sm=self, config=config, dispatcher=dp, depth=100)
 
     async def start(self, initial_state: StateSpec, context: Any) -> None:
-        await self._engine.start_engine(
+        result = self._engine.start_engine(
             initial_state=initial_state, context=context, is_async=True
-        )  # type: ignore[return-value]
+        )
+        result = await result if iscoroutine(result) else result
 
     async def stop(self, force: bool = False) -> None:
         await self._engine.stop_engine(is_async=True, force=force)  # type: ignore[return-value]
