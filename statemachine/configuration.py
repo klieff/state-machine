@@ -84,7 +84,7 @@ class StateMachineConfigs:
             target=target_state,
             actions=prepare_callbacks(actions),
             guards=prepare_callbacks(guards),
-            router=prepare_callbacks(router).pop(),
+            router=None if router is None else prepare_callbacks(router).pop(),
         )
         self.transitions.setdefault((source_state.state, event), []).append(t)
 
