@@ -129,7 +129,6 @@ class BaseEngine:
 
     async def _stop_queue_manager(self) -> None:
         if self._running:
-            self._drain_queue()
             await self._queue.put("STOP")
             await self._queue.join()
             await self._worker_task
@@ -163,8 +162,9 @@ class BaseEngine:
         while not self._queue.empty():
             try:
                 item = self._queue.get_nowait()
+                self._queue.task_done()
+
                 if item == "STOP":
-                    self._queue.task_done()
                     break
 
                 if not item.future.done():
@@ -174,8 +174,6 @@ class BaseEngine:
                     item.coro.close()
                 except RuntimeError:
                     pass
-
-                self._queue.task_done()
             except asyncio.QueueEmpty:
                 break
 
@@ -207,11 +205,9 @@ class AsyncEngine(BaseEngine):
             event = EngineEvent.AUTOMATIC_TRANSITION
 
         if state.on_entry:
-            info = self._info_pool
-            info.source = state.state
-            info.event = EngineEvent.MACHINE_START.name
-            info.payload = None
-            info.step = EngineStep.ON_ENTRY_EVALUATE.name
+            self._info_pool.source = state.state
+            self._info_pool.event = EngineEvent.MACHINE_START.name
+            self._info_pool.step = EngineStep.ON_ENTRY_EVALUATE.name
 
             coro = self._evaluate_on_entry(state)
             self._runtime.submit(coro=self._queue_task(coro)).result()
@@ -219,7 +215,7 @@ class AsyncEngine(BaseEngine):
         if event is not None:
             return self.event_trigger(event=event, payload=None, is_async=is_async)
 
-    def stop_engine(self, is_async: bool, force: bool = False) -> Coroutine | None:
+    def stop_engine(self, is_async: bool) -> Coroutine | None:
         coro = self._stop_queue_manager()
         if is_async:
             return self._runtime.submit_async(coro=coro)

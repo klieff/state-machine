@@ -164,8 +164,8 @@ class SyncStateMachine:
             initial_state=initial_state, context=context, is_async=False
         )  # type: ignore[return-value]
 
-    def stop(self, force: bool = False) -> None:
-        return self._engine.stop_engine(is_async=False, force=force)  # type: ignore[return-value]
+    def stop(self) -> None:
+        return self._engine.stop_engine(is_async=False)  # type: ignore[return-value]
 
     def trigger(self, event: EventSpec, payload: Any = None) -> None:
         return self._engine.event_trigger(
@@ -197,8 +197,8 @@ class AsyncStateMachine:
         )
         result = await result if iscoroutine(result) else result
 
-    async def stop(self, force: bool = False) -> None:
-        await self._engine.stop_engine(is_async=True, force=force)  # type: ignore[return-value]
+    async def stop(self) -> None:
+        await self._engine.stop_engine(is_async=True)  # type: ignore[return-value]
 
     async def trigger(self, event: EventSpec, payload: Any = None) -> None:
         await self._engine.event_trigger(
