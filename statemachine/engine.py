@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections import deque
 from collections.abc import Callable, Coroutine, Iterable
 from concurrent.futures import Future as ConcurrentFuture
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from .audit import AuditRecord, MicroStep
 from .callbacks import CallbackSpec
@@ -37,12 +38,19 @@ class MaxTransitionError(Exception): ...
 class CallbackError(Exception): ...
 
 
+class StateMachineStop(Exception): ...
+
+
 @dataclass(slots=True, frozen=True)
 class TaskRequest:
     coro: Coroutine
-    future: asyncio.Future[None]
+    future: asyncio.Future[None] | None = None
 
 
+# TODO: Implement a threadpool executor for handling synchronous callbacks:
+#       self._executor = ThreadPoolExecutor(max_workers=10)
+#       await self._loop.run_in_executor(self._executor, sync_callback)
+#       or instead await asyncio.to_thread(sync_callback)
 class EngineRuntime:
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -113,11 +121,13 @@ class BaseEngine:
         self._dispatcher = dispatcher
         self._info_pool = TransitionInfo(machine=sm)
         self._transition_depth = depth
+        self._internal_event = False
         self._running: bool = False
 
     async def _start_on_runtime_loop(self) -> None:
         if not self._running:
-            self._queue: asyncio.Queue[TaskRequest | Literal["STOP"]] = asyncio.Queue()
+            self._external_queue: asyncio.Queue[TaskRequest | None] = asyncio.Queue()
+            self._internal_queue = deque()
             self._worker_task = self._runtime.create_task(self._queue_manager())
             self._running = True
 
@@ -128,48 +138,72 @@ class BaseEngine:
         self._runtime.submit(self._start_on_runtime_loop()).result()
 
     async def _stop_queue_manager(self) -> None:
-        if self._running:
-            await self._queue.put("STOP")
-            await self._queue.join()
-            await self._worker_task
-            self._running = False
+        if not self._running:
+            return
 
-    async def _queue_task(self, coro: Coroutine[Any, Any, Any]) -> None:
+        self._running = False
+        self._external_queue.put_nowait(None)
+        # await self._external_queue.put(None)
+
+    async def _queue_external_task(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """
+        Must be called via EngineRuntime submit/submit_async for threadsafety
+        """
         future = self._runtime.create_future()
-        await self._queue.put(TaskRequest(coro=coro, future=future))
-        await future
+        try:
+            self._external_queue.put_nowait(TaskRequest(coro=coro, future=future))
+            await future
+        except Exception as e:
+            if not future.done():
+                future.set_exception(e)
+            raise
+
+    async def _queue_internal_task(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """
+        Can be invoked directly as it executes on the Runtime thread's event loop
+        """
+        request = TaskRequest(coro=coro, future=None)
+        self._internal_queue.append(request)
 
     async def _queue_manager(self) -> None:
         try:
             while True:
-                request = await self._queue.get()
-                if request == "STOP":
-                    self._queue.task_done()
+                external = await self._external_queue.get()
+                if external is None or not self._running:
+                    self._external_queue.task_done()
                     break
 
                 try:
-                    await request.coro
-                    request.future.set_result(None)
+                    result = await external.coro
+                    if external.future and not external.future.done():
+                        external.future.set_result(result)
                 except Exception as e:
-                    request.future.set_exception(e)
+                    if external.future and not external.future.done():
+                        external.future.set_exception(e)
                     break
                 finally:
-                    self._queue.task_done()
+                    self._external_queue.task_done()
+
+                while self._internal_queue:
+                    internal = self._internal_queue.popleft()
+                    try:
+                        result = await internal.coro
+                    except Exception as e:
+                        raise e
         finally:
+            print("QUEUE MANAGER TASK COMPLETED")
             self._drain_queue()
 
     def _drain_queue(self):
-        while not self._queue.empty():
+        while not self._external_queue.empty():
             try:
-                item = self._queue.get_nowait()
-                self._queue.task_done()
+                item = self._external_queue.get_nowait()
+                self._external_queue.task_done()
+                if item is None:
+                    continue
 
-                if item == "STOP":
-                    break
-
-                if not item.future.done():
+                if item.future and not item.future.done():
                     item.future.cancel()
-
                 try:
                     item.coro.close()
                 except RuntimeError:
@@ -210,7 +244,7 @@ class AsyncEngine(BaseEngine):
             self._info_pool.step = EngineStep.ON_ENTRY_EVALUATE.name
 
             coro = self._evaluate_on_entry(state)
-            self._runtime.submit(coro=self._queue_task(coro)).result()
+            self._runtime.submit(coro=self._queue_external_task(coro)).result()
 
         if event is not None:
             return self.event_trigger(event=event, payload=None, is_async=is_async)
@@ -232,10 +266,19 @@ class AsyncEngine(BaseEngine):
             raise InvalidEvent
 
         coro = self._processing_loop(event=event, payload=payload)
-        if is_async:
-            return self._runtime.submit_async(coro=self._queue_task(coro))
 
-        self._runtime.submit(coro=self._queue_task(coro)).result()
+        if self._internal_event:
+            if is_async:
+                return self._queue_internal_task(coro)
+            else:
+                request = TaskRequest(coro=coro, future=None)
+                self._internal_queue.append(request)
+                return
+
+        if is_async:
+            return self._runtime.submit_async(coro=self._queue_external_task(coro))
+
+        self._runtime.submit(coro=self._queue_external_task(coro)).result()
 
     async def _processing_loop(
         self, event: EventSpec, payload: Any | None = None
@@ -296,7 +339,11 @@ class AsyncEngine(BaseEngine):
 
                 record.event = event
                 record.success = True
+        except StateMachineStop:
+            self._running = False
+            record.success = False
         except Exception as e:
+            self._running = False
             record.event = EngineEvent.EXCEPTION
             record.exception = e
             record.success = False
@@ -340,11 +387,17 @@ class AsyncEngine(BaseEngine):
         raise InvalidRouterState
 
     async def _execute_callback(self, callback: CallbackSpec) -> Any:
+        self._internal_event = True
         try:
             result = callback.invoke(self._context, self._info_pool)
             result = await result if callback.is_async else result
         except Exception as e:
             raise CallbackError from e
+        finally:
+            self._internal_event = False
+
+        if not self._running:
+            raise StateMachineStop
 
         return result
 
