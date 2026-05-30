@@ -30,8 +30,9 @@ def _get_callback_signature(callback: Callable) -> CallbackSpec:
     if iscoroutine(callback):
         raise TypeError(f"Callback must be callable, got {type(callback).__name__}")
 
-    inner_func = getattr(callback, "__func__", callback)
-    sig = signature(inner_func)
+    # inner_func = getattr(callback, "__func__", callback) # includes self/cls in param count
+    # sig = signature(inner_func)
+    sig = signature(callback)
 
     count = 0
     for param in sig.parameters.values():

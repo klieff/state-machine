@@ -47,7 +47,7 @@ class TaskRequest:
     future: asyncio.Future[None] | None = None
 
 
-# TODO: Implement a threadpool executor for handling synchronous callbacks:
+# TODO: Implement a threadpool executor for handling sync callbacks in async mode:
 #       self._executor = ThreadPoolExecutor(max_workers=10)
 #       await self._loop.run_in_executor(self._executor, sync_callback)
 #       or instead await asyncio.to_thread(sync_callback)
@@ -128,6 +128,7 @@ class BaseEngine:
         if not self._running:
             self._external_queue: asyncio.Queue[TaskRequest | None] = asyncio.Queue()
             self._internal_queue = deque()
+            self._processing_lock = asyncio.Lock()
             self._worker_task = self._runtime.create_task(self._queue_manager())
             self._running = True
 
@@ -141,17 +142,19 @@ class BaseEngine:
         if not self._running:
             return
 
-        self._running = False
         self._external_queue.put_nowait(None)
         # await self._external_queue.put(None)
+        await self._external_queue.join()  # block till all tasks have been processed
+        self._running = False
 
     async def _queue_external_task(self, coro: Coroutine[Any, Any, Any]) -> None:
         """
-        Must be called via EngineRuntime submit/submit_async for threadsafety
+        Should be called via EngineRuntime submit/submit_async for thread-safety
         """
         future = self._runtime.create_future()
         try:
             self._external_queue.put_nowait(TaskRequest(coro=coro, future=future))
+            # await self._external_queue.put(TaskRequest(coro=coro, future=future))
             await future
         except Exception as e:
             if not future.done():
@@ -169,27 +172,29 @@ class BaseEngine:
         try:
             while True:
                 external = await self._external_queue.get()
-                if external is None or not self._running:
-                    self._external_queue.task_done()
-                    break
 
-                try:
-                    result = await external.coro
-                    if external.future and not external.future.done():
-                        external.future.set_result(result)
-                except Exception as e:
-                    if external.future and not external.future.done():
-                        external.future.set_exception(e)
-                    break
-                finally:
-                    self._external_queue.task_done()
+                async with self._processing_lock:
+                    if external is None or not self._running:
+                        self._external_queue.task_done()
+                        break
 
-                while self._internal_queue:
-                    internal = self._internal_queue.popleft()
                     try:
-                        result = await internal.coro
+                        result = await external.coro
+                        if external.future and not external.future.done():
+                            external.future.set_result(result)
                     except Exception as e:
-                        raise e
+                        if external.future and not external.future.done():
+                            external.future.set_exception(e)
+                        break
+                    finally:
+                        self._external_queue.task_done()
+
+                    while self._internal_queue:
+                        internal = self._internal_queue.popleft()
+                        try:
+                            result = await internal.coro
+                        except Exception as e:
+                            raise e
         finally:
             print("QUEUE MANAGER TASK COMPLETED")
             self._drain_queue()
