@@ -71,9 +71,9 @@ class EngineRuntime:
         self.assert_runtime_thread()
         return self._loop.create_future()
 
-    def create_task[R](self, coro: Coroutine[Any, Any, R]) -> asyncio.Task[R]:
+    def create_task[R](self, coro: Coroutine[Any, Any, R], **kwargs) -> asyncio.Task[R]:
         self.assert_runtime_thread()
-        return self._loop.create_task(coro=coro)
+        return self._loop.create_task(coro=coro, **kwargs)
 
     def submit[R](self, coro: Coroutine[Any, Any, R]) -> ConcurrentFuture[R]:
         return asyncio.run_coroutine_threadsafe(coro=coro, loop=self._loop)
@@ -129,8 +129,19 @@ class BaseEngine:
             self._external_queue: asyncio.Queue[TaskRequest | None] = asyncio.Queue()
             self._internal_queue = deque()
             self._processing_lock = asyncio.Lock()
-            self._worker_task = self._runtime.create_task(self._queue_manager())
+            self._worker_task = self._runtime.create_task(
+                self._queue_manager(), name="Queue Manager"
+            )
+            self._worker_task.add_done_callback(self._queue_manager_callback)
             self._running = True
+
+    def _queue_manager_callback(self, task: asyncio.Task) -> None:
+        try:
+            exception = task.exception()
+            if exception:
+                print(f"Worker '{task.get_name()}' crashed: {exception}")
+        except asyncio.CancelledError:
+            print("Qeueu manager cancelled.")
 
     def _start_queue_manager(self) -> None:
         if not self._runtime.is_running():
@@ -142,10 +153,18 @@ class BaseEngine:
         if not self._running:
             return
 
-        self._external_queue.put_nowait(None)
         # await self._external_queue.put(None)
-        await self._external_queue.join()  # block till all tasks have been processed
+        # await self._external_queue.join()  # block till all tasks have been processed
+        self._external_queue.put_nowait(None)
         self._running = False
+
+        if self._worker_task:
+            try:
+                await self._worker_task
+            except asyncio.CancelledError:
+                pass
+            except RuntimeError as e:
+                print(f"Queue manager failed before shutdown: {e}")
 
     async def _queue_external_task(self, coro: Coroutine[Any, Any, Any]) -> None:
         """
@@ -185,7 +204,8 @@ class BaseEngine:
                     except Exception as e:
                         if external.future and not external.future.done():
                             external.future.set_exception(e)
-                        break
+                        # break
+                        raise e
                     finally:
                         self._external_queue.task_done()
 
@@ -215,6 +235,13 @@ class BaseEngine:
                     pass
             except asyncio.QueueEmpty:
                 break
+
+        while self._internal_queue:
+            internal = self._internal_queue.popleft()
+            try:
+                internal.coro.close()
+            except Exception:
+                pass
 
     # async def _get_state(self) -> StateSpec:
     #     self._runtime.assert_runtime_thread()
@@ -345,10 +372,10 @@ class AsyncEngine(BaseEngine):
                 record.event = event
                 record.success = True
         except StateMachineStop:
-            self._running = False
+            # self._running = False
             record.success = False
         except Exception as e:
-            self._running = False
+            # self._running = False
             record.event = EngineEvent.EXCEPTION
             record.exception = e
             record.success = False

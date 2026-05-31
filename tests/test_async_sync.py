@@ -7,6 +7,7 @@ from statemachine.statemachine import SyncStateMachine, AsyncStateMachine
 class async_test:
     async def wait(self):
         print("ASYNC SLEEP ENTERED")
+        # a = 6 / 0
         await asyncio.sleep(2)
         # time.sleep(2)
         print("ASYNC SLEEP EXITED")
@@ -35,18 +36,17 @@ class sync_test:
 
 
 async def run_async(sm: AsyncStateMachine):
-    # await asyncio.gather(
-    #     sm.start("off", None), sm.trigger("start"), sm.trigger("stop"), sm.stop()
-    # )
-    await sm.start("off", None)
-    print(sm.get_state())
-    await sm.trigger("start")
-    print(sm.get_state())
-    await sm.trigger("stop")
-    print(sm.get_state())
-    await sm.stop()
-    print(sm.get_state())
-    # time.sleep(3)
+    await asyncio.gather(
+        sm.start("off", None),
+        sm.trigger("start"),
+        sm.trigger("stop"),
+        sm.stop(),
+        return_exceptions=True,
+    )
+    # await sm.start("off", None)
+    # await sm.trigger("start")
+    # await sm.trigger("stop")
+    # await sm.stop()
     print("ASYNC TESTS COMPLETED.")
 
 
